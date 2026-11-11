@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -66,12 +65,15 @@ def test_load_single_agent_checkpoint_roundtrip(tmp_path: Path) -> None:
     ckpt = tmp_path / "single.jsonl"
     r0 = SingleAgentResult(
         index=0,
-        question="1+1?",
-        ground_truth=Decimal(2),
-        raw_response=r"\boxed{2}",
-        boxed_raw="2",
-        predicted=Decimal(2),
+        question="Simplify $\\frac{1}{2} + \\frac{1}{3}$.",
+        ground_truth=r"\frac{5}{6}",
+        raw_response=r"\boxed{\frac{5}{6}}",
+        boxed_raw=r"\frac{5}{6}",
+        predicted=r"\frac{5}{6}",
         is_correct=True,
+        subject="Algebra",
+        level=2,
+        unique_id="test/algebra/0.json",
     )
     append_jsonl_record(ckpt, serialize_single_agent_result(r0))
 
@@ -86,9 +88,9 @@ def test_load_debate_checkpoint_groups_rounds_by_sample(tmp_path: Path) -> None:
         agent_id=1,
         peer_agent_ids=[],
         prompt_sent="Q",
-        response_text=r"\boxed{10}",
-        boxed_raw="10",
-        predicted=Decimal(10),
+        response_text=r"\boxed{\frac{10}{3}}",
+        boxed_raw=r"\frac{10}{3}",
+        predicted=r"\frac{10}{3}",
         changed_from_prev_round=False,
     )
     log_a2 = AgentRoundLog(
@@ -96,9 +98,9 @@ def test_load_debate_checkpoint_groups_rounds_by_sample(tmp_path: Path) -> None:
         agent_id=2,
         peer_agent_ids=[],
         prompt_sent="Q",
-        response_text=r"\boxed{12}",
-        boxed_raw="12",
-        predicted=Decimal(12),
+        response_text=r"\boxed{6 - 5i}",
+        boxed_raw="6 - 5i",
+        predicted="6 - 5i",
         changed_from_prev_round=False,
     )
     append_jsonl_record(
@@ -107,7 +109,7 @@ def test_load_debate_checkpoint_groups_rounds_by_sample(tmp_path: Path) -> None:
             "record_type": "round",
             "sample_index": 3,
             "question": "Q",
-            "ground_truth": "12",
+            "ground_truth": "6 - 5i",
             "num_agents": 2,
             "num_rounds": 3,
             "round_num": 1,
@@ -120,6 +122,7 @@ def test_load_debate_checkpoint_groups_rounds_by_sample(tmp_path: Path) -> None:
 
     loaded = load_debate_checkpoint(ckpt)
     assert 3 in loaded
+    assert loaded[3].ground_truth == "6 - 5i"
     assert [log.agent_id for log in loaded[3].rounds[1]] == [1, 2]
 
 
@@ -138,4 +141,3 @@ def test_daily_quota_vs_rpm_error_classification() -> None:
     assert is_retryable_error(daily_429) is False
     assert is_daily_quota_error(rpm_429) is False
     assert is_retryable_error(rpm_429) is True
-

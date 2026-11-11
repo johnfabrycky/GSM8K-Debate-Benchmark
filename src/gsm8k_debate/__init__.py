@@ -1,4 +1,4 @@
-"""gsm8k-debate package initialization."""
+"""gsm8k-debate package initialization (MATH-500 & competition math support)."""
 
 from gsm8k_debate.benchmark import (
     build_comparison_dataframe,
@@ -9,7 +9,12 @@ from gsm8k_debate.benchmark import (
 )
 from gsm8k_debate.checkpoint import PreemptionMonitor, PreemptionRequestedError
 from gsm8k_debate.config import create_genai_client, get_gemini_api_key
-from gsm8k_debate.dataset import GSM8KSample, load_gsm8k_subset
+from gsm8k_debate.dataset import (
+    GSM8KSample,
+    MathSample,
+    load_gsm8k_subset,
+    load_math500_subset,
+)
 from gsm8k_debate.debate import (
     DEFAULT_DEBATE_TEMPERATURE,
     DEFAULT_NUM_AGENTS,
@@ -35,12 +40,16 @@ from gsm8k_debate.parsing import (
     extract_boxed_content,
     extract_boxed_number,
     extract_ground_truth_answer,
+    extract_math_answer,
+    normalize_latex_answer,
+    parse_math_answer,
     parse_numeric_answer,
 )
 from gsm8k_debate.single_agent import (
     DEFAULT_FLASH_MODEL,
     SingleAgentResult,
     evaluate_gsm8k_subset,
+    evaluate_math_subset,
     solve_math_question,
 )
 
@@ -54,6 +63,7 @@ __all__ = [
     "DebateSampleResult",
     "ErrorClassification",
     "GSM8KSample",
+    "MathSample",
     "PreemptionMonitor",
     "PreemptionRequestedError",
     "SingleAgentResult",
@@ -67,13 +77,18 @@ __all__ = [
     "create_genai_client",
     "evaluate_debate_subset",
     "evaluate_gsm8k_subset",
+    "evaluate_math_subset",
     "extract_boxed_content",
     "extract_boxed_number",
     "extract_ground_truth_answer",
+    "extract_math_answer",
     "find_arithmetic_slips",
     "format_debate_trace",
     "get_gemini_api_key",
     "load_gsm8k_subset",
+    "load_math500_subset",
+    "normalize_latex_answer",
+    "parse_math_answer",
     "parse_numeric_answer",
     "run_benchmark_comparison",
     "run_debate_for_sample",

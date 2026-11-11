@@ -1,6 +1,6 @@
-# gsm8k-debate
+# math-debate (HuggingFaceH4/MATH-500)
 
-Async multi-agent debate benchmark on GSM8K using Python 3.10+ and the `google-genai` SDK.
+Async multi-agent debate benchmark on `HuggingFaceH4/MATH-500` using Python 3.10+, `sympy` symbolic equivalence verification, and the `google-genai` SDK.
 
 ## Setup
 
@@ -42,7 +42,7 @@ setx GEMINI_API_KEY "your-actual-api-key"
 With `.venv` activated:
 
 ```powershell
-python -c "import google.genai; print('Ready')"
+python -c "import google.genai, sympy; print('Ready')"
 ```
 
 Run the smoke and unit test suite:
@@ -51,29 +51,29 @@ Run the smoke and unit test suite:
 pytest
 ```
 
-### 4. Run single-agent GSM8K baseline
+### 4. Run single-agent MATH-500 baseline
 
-Evaluate Gemini Flash on a small subset of the `openai/gsm8k` test split (default: 15 samples):
+Evaluate Gemini Flash on a subset of `HuggingFaceH4/MATH-500` (default: 15 samples):
 
 ```powershell
 python scripts/run_single_agent.py --num-samples 15
 ```
 
-If you are on the Gemini API Free Tier (e.g., 5 requests/minute), pass `--rpm 4` to pace requests cleanly alongside automatic `429`/`503` retries:
+You can also filter by competition subject or difficulty level (`1`–`5`):
 
 ```powershell
-python scripts/run_single_agent.py --num-samples 10 --rpm 4
+python scripts/run_single_agent.py --num-samples 20 --subject "Number Theory" --level 5
 ```
 
 ### 5. Run multi-agent debate (Du et al.)
 
-Run the 3-agent, 3-round asynchronous debate loop and inspect the intermediate logs (default saves full JSON traces to `logs/debate_logs.json` and prints a preview trace):
+Run the 3-agent async debate loop (Round 1 independent competition proof + Rounds 2 & 3 peer-debate rounds) and inspect the intermediate logs (`logs/math500/debate_logs.json`):
 
 ```powershell
 python scripts/run_debate.py --num-samples 5 --show-logs 2
 ```
 
-For Free Tier quotas (`--rpm 4`), start with 1–3 samples (3 agents × 3 rounds = 9 API calls per sample):
+For Free Tier quotas (`--rpm 4`), start with 1–3 samples (3 agents × 3 turns = 9 API calls per sample):
 
 ```powershell
 python scripts/run_debate.py --num-samples 2 --rpm 4 --show-logs 2
@@ -81,26 +81,26 @@ python scripts/run_debate.py --num-samples 2 --rpm 4 --show-logs 2
 
 ### 6. Preemption & Resume Support
 
-Both `run_single_agent.py` and `run_debate.py` flush incremental JSONL checkpoints (`logs/single_agent_checkpoint.jsonl` and round-level `logs/debate_checkpoint.jsonl`) and handle `SIGINT`/`SIGTERM` gracefully. If interrupted mid-run, resume from where it left off without repeating completed rounds or samples:
+Both `run_single_agent.py` and `run_debate.py` flush incremental JSONL checkpoints (`logs/math500/single_agent_checkpoint.jsonl` and round-level `logs/math500/debate_checkpoint.jsonl`) and handle `SIGINT`/`SIGTERM` gracefully. If interrupted mid-run, resume from where it left off without repeating completed rounds or samples:
 
 ```powershell
-python scripts/run_debate.py --num-samples 5 --rpm 4 --resume
+python scripts/run_debate.py --num-samples 5 --resume
 ```
 
 ### 7. Inspect intermediate round logs
 
-Inspect `logs/debate_logs.json` (completed runs) or `logs/debate_checkpoint.jsonl` (in-progress or preempted runs) to see every round's peer inputs (`--show-prompts`), critiques, and answer changes:
+Inspect `logs/math500/debate_logs.json` (completed runs) or `logs/math500/debate_checkpoint.jsonl` (in-progress or preempted runs) to see every round's peer inputs (`--show-prompts`), proof critiques, and answer changes:
 
 ```powershell
-python scripts/inspect_logs.py --log-file logs/debate_logs.json --show-prompts
+python scripts/inspect_logs.py --log-file logs/math500/debate_logs.json --show-prompts
 ```
 
 ### 8. Side-by-side Single-Agent vs. Debate benchmark
 
-Compare Single-Agent baseline against 3-Round Debate on 100 GSM8K test instances (`--resume` reuses any existing checkpoints in `logs/`), logging accuracy, error types (`arithmetic_slip` vs. `conceptual_logic_error`), and total execution time:
+Compare Single-Agent baseline against 3-Agent Multi-Round Debate on 100 `HuggingFaceH4/MATH-500` test instances (`--resume` reuses checkpoints in `logs/math500`), logging accuracy, LaTeX/SymPy answer changes, error types (`arithmetic_slip` vs. `conceptual_logic_error`), subject/level breakdowns, and execution time to `results/math500/`:
 
 ```powershell
-python scripts/run_benchmark.py --num-samples 100 --resume
+python scripts/run_benchmark.py --num-samples 100 --max-concurrency 15 --resume
 ```
 
 For Free Tier quotas (e.g., 5 RPM), pass `--rpm 4` so requests are spaced smoothly without `429` bursts:
@@ -108,4 +108,3 @@ For Free Tier quotas (e.g., 5 RPM), pass `--rpm 4` so requests are spaced smooth
 ```powershell
 python scripts/run_benchmark.py --num-samples 100 --rpm 4 --resume
 ```
-

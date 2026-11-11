@@ -12,7 +12,7 @@ import pandas as pd
 from google import genai
 
 from gsm8k_debate.checkpoint import PreemptionMonitor, atomic_write_text, atomic_write_via
-from gsm8k_debate.dataset import GSM8KSample
+from gsm8k_debate.dataset import MathSample
 from gsm8k_debate.debate import (
     DEFAULT_DEBATE_TEMPERATURE,
     DEFAULT_NUM_AGENTS,
@@ -26,7 +26,8 @@ from gsm8k_debate.error_analysis import (
     ERROR_NONE,
     classify_response_error,
 )
-from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL, evaluate_gsm8k_subset
+from gsm8k_debate.parsing import answers_match
+from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL, evaluate_math_subset
 
 
 def classify_outcome(single_correct: bool, debate_correct: bool) -> str:
@@ -62,7 +63,9 @@ def _classify_debate_sample_error(result: DebateSampleResult) -> tuple[str, str 
 
     # Inspect the agents that voted for the winning (incorrect) consensus answer.
     consensus_voters = [
-        log for log in final_logs if log.predicted == result.consensus_answer
+        log
+        for log in final_logs
+        if log.predicted is not None and answers_match(log.predicted, result.consensus_answer)
     ]
     representative = consensus_voters[0] if consensus_voters else final_logs[0]
     classification = classify_response_error(
@@ -85,6 +88,8 @@ def build_comparison_dataframe(
     round_cols = [f"round_{r}_majority" for r in range(1, num_rounds + 1)]
     expected_cols = [
         "index",
+        "subject",
+        "level",
         "ground_truth",
         "single_boxed",
         "single_predicted",
@@ -104,11 +109,12 @@ def build_comparison_dataframe(
         return pd.DataFrame(columns=expected_cols)
 
     single_cols = ["index", "ground_truth", "boxed_raw", "predicted", "is_correct"]
-    has_raw = "raw_response" in single_df.columns
-    has_err = "error" in single_df.columns
-    if has_raw:
+    for meta_col in ("subject", "level"):
+        if meta_col in single_df.columns:
+            single_cols.append(meta_col)
+    if "raw_response" in single_df.columns:
         single_cols.append("raw_response")
-    if has_err:
+    if "error" in single_df.columns:
         single_cols.append("error")
 
     left = single_df[single_cols].rename(
@@ -137,13 +143,27 @@ def build_comparison_dataframe(
     if merged.empty:
         return pd.DataFrame(columns=expected_cols)
 
+    debate_by_index = {res.index: res for res in debate_results} if debate_results else {}
+
+    if "subject" not in merged.columns:
+        merged["subject"] = [
+            debate_by_index[int(idx)].subject if int(idx) in debate_by_index else None
+            for idx in merged["index"]
+        ]
+    if "level" not in merged.columns:
+        merged["level"] = [
+            debate_by_index[int(idx)].level if int(idx) in debate_by_index else None
+            for idx in merged["index"]
+        ]
+
     single_error_types: list[str] = []
     single_error_details: list[str | None] = []
     for row in merged.itertuples(index=False):
         raw_resp = str(getattr(row, "raw_response", "") or "")
         err_val = getattr(row, "error", None)
         err_msg = str(err_val) if pd.notna(err_val) and err_val is not None else None
-        pred_val = row.single_predicted if pd.notna(row.single_predicted) else None
+        pred_raw = row.single_predicted
+        pred_val = str(pred_raw) if pd.notna(pred_raw) and pred_raw is not None else None
         cls = classify_response_error(
             is_correct=bool(row.single_correct),
             response_text=raw_resp,
@@ -153,7 +173,6 @@ def build_comparison_dataframe(
         single_error_types.append(cls.error_type)
         single_error_details.append(cls.detail)
 
-    debate_by_index = {res.index: res for res in debate_results} if debate_results else {}
     debate_error_types: list[str] = []
     debate_error_details: list[str | None] = []
     for row in merged.itertuples(index=False):
@@ -161,7 +180,8 @@ def build_comparison_dataframe(
         if res_obj is not None:
             d_type, d_detail = _classify_debate_sample_error(res_obj)
         else:
-            cons_val = row.debate_consensus if pd.notna(row.debate_consensus) else None
+            cons_raw = row.debate_consensus
+            cons_val = str(cons_raw) if pd.notna(cons_raw) and cons_raw is not None else None
             cls = classify_response_error(
                 is_correct=bool(row.debate_correct),
                 response_text="",
@@ -180,6 +200,30 @@ def build_comparison_dataframe(
         for s_ok, d_ok in zip(merged["single_correct"], merged["debate_correct"], strict=True)
     ]
     return merged[expected_cols]
+
+
+def _build_group_breakdown(
+    comparison_df: pd.DataFrame,
+    column: str,
+) -> dict[str, dict[str, float | int]]:
+    if comparison_df.empty or column not in comparison_df.columns:
+        return {}
+    valid = comparison_df[comparison_df[column].notna()]
+    if valid.empty:
+        return {}
+
+    breakdown: dict[str, dict[str, float | int]] = {}
+    for key, group in valid.groupby(column, sort=True):
+        s_acc = float(group["single_correct"].mean())
+        d_acc = float(group["debate_correct"].mean())
+        label = str(int(key)) if column == "level" and isinstance(key, (int, float)) else str(key)
+        breakdown[label] = {
+            "count": len(group),
+            "single_accuracy": round(s_acc, 4),
+            "debate_accuracy": round(d_acc, 4),
+            "accuracy_delta": round(d_acc - s_acc, 4),
+        }
+    return breakdown
 
 
 def summarize_benchmark(
@@ -234,6 +278,7 @@ def summarize_benchmark(
     )
 
     summary: dict[str, Any] = {
+        "dataset": "HuggingFaceH4/MATH-500",
         "model": debate_metrics.get("model", single_metrics.get("model", DEFAULT_FLASH_MODEL)),
         "num_agents": num_agents,
         "num_rounds": num_rounds,
@@ -264,11 +309,19 @@ def summarize_benchmark(
     for round_num in range(1, num_rounds + 1):
         key = f"round_{round_num}_accuracy"
         summary[key] = float(debate_metrics.get(key, 0.0))
+
+    subject_breakdown = _build_group_breakdown(comparison_df, "subject")
+    if subject_breakdown:
+        summary["subject_breakdown"] = subject_breakdown
+    level_breakdown = _build_group_breakdown(comparison_df, "level")
+    if level_breakdown:
+        summary["level_breakdown"] = level_breakdown
+
     return summary
 
 
 async def run_benchmark_comparison(
-    samples: Sequence[GSM8KSample],
+    samples: Sequence[MathSample],
     *,
     client: genai.Client | None = None,
     model: str = DEFAULT_FLASH_MODEL,
@@ -295,7 +348,7 @@ async def run_benchmark_comparison(
     overall_start = time.perf_counter()
 
     single_start = time.perf_counter()
-    single_df, single_metrics = await evaluate_gsm8k_subset(
+    single_df, single_metrics = await evaluate_math_subset(
         samples,
         client=client,
         model=model,

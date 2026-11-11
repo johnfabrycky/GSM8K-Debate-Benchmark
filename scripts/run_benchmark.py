@@ -1,4 +1,4 @@
-"""Run side-by-side Single-Agent vs. Multi-Agent Debate benchmark on GSM8K."""
+"""Run side-by-side Single-Agent vs. Multi-Agent Debate benchmark on MATH-500."""
 
 from __future__ import annotations
 
@@ -10,20 +10,32 @@ from pathlib import Path
 
 from gsm8k_debate.benchmark import run_benchmark_comparison, save_benchmark_outputs
 from gsm8k_debate.checkpoint import PreemptionMonitor
-from gsm8k_debate.dataset import load_gsm8k_subset
+from gsm8k_debate.dataset import load_math500_subset
 from gsm8k_debate.debate import DEFAULT_DEBATE_TEMPERATURE, DEFAULT_NUM_AGENTS, DEFAULT_NUM_ROUNDS
 from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare Single-Agent vs. Multi-Agent Debate on a GSM8K test subset."
+        description="Compare Single-Agent vs. Multi-Agent Debate on HuggingFaceH4/MATH-500."
     )
     parser.add_argument(
         "--num-samples",
         type=int,
         default=100,
-        help="Number of GSM8K test samples to benchmark (default: 100).",
+        help="Number of MATH-500 test samples to benchmark (default: 100).",
+    )
+    parser.add_argument(
+        "--subject",
+        type=str,
+        default=None,
+        help="Optional MATH-500 subject filter (e.g., Algebra, Number Theory, Precalculus).",
+    )
+    parser.add_argument(
+        "--level",
+        type=int,
+        default=None,
+        help="Optional MATH-500 difficulty level filter (1-5).",
     )
     parser.add_argument(
         "--num-agents",
@@ -35,7 +47,10 @@ def parse_args() -> argparse.Namespace:
         "--num-rounds",
         type=int,
         default=DEFAULT_NUM_ROUNDS,
-        help=f"Number of debate rounds (default: {DEFAULT_NUM_ROUNDS}).",
+        help=(
+            "Total turns per sample: Round 1 initial + (N-1) peer-debate rounds "
+            f"(default: {DEFAULT_NUM_ROUNDS}, i.e., 1 initial + 2 debate rounds)."
+        ),
     )
     parser.add_argument(
         "--model",
@@ -87,14 +102,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
-        default=Path("logs"),
-        help="Directory holding single_agent_checkpoint.jsonl and debate_checkpoint.jsonl.",
+        default=Path("logs/math500"),
+        help=(
+            "Directory holding single_agent_checkpoint.jsonl and debate_checkpoint.jsonl "
+            "(default: logs/math500)."
+        ),
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("results/benchmark"),
-        help="Directory to write comparison.csv, summary.json, and debate_logs.json.",
+        default=Path("results/math500"),
+        help=(
+            "Directory to write comparison.csv, summary.json, and debate_logs.json "
+            "(default: results/math500)."
+        ),
     )
     parser.add_argument(
         "--resume",
@@ -117,12 +138,14 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
-    print(f"Loading {args.num_samples} GSM8K test samples from Hugging Face datasets...")
-    samples = load_gsm8k_subset(
+    print(f"Loading {args.num_samples} samples from HuggingFaceH4/MATH-500 (test)...")
+    samples = load_math500_subset(
         num_samples=args.num_samples,
         split="test",
         shuffle=args.shuffle,
         seed=args.seed,
+        subject=args.subject,
+        level=args.level,
     )
 
     single_ckpt = args.checkpoint_dir / "single_agent_checkpoint.jsonl"
@@ -154,6 +177,8 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     if not comparison_df.empty:
         preview_cols = [
             "index",
+            "subject",
+            "level",
             "ground_truth",
             "single_predicted",
             "single_correct",
@@ -168,6 +193,7 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
         print(comparison_df[preview_cols].head(20).to_string(index=False))
 
     print("\n=== Benchmark Summary ===")
+    print(f"Dataset:                {summary['dataset']}")
     print(f"Model:                  {summary['model']}")
     print(f"Compared Samples:       {summary['compared_samples']} / {summary['requested_samples']}")
     print(f"Single-Agent Accuracy:  {summary['single_agent_accuracy']:.2%}")
@@ -184,6 +210,10 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     print(f"Single-Agent Errors:    {summary['single_error_breakdown']}")
     print(f"Debate Errors:          {summary['debate_error_breakdown']}")
     print(f"Total Answer Changes:   {summary['total_answer_changes']}")
+    if "subject_breakdown" in summary:
+        print(f"By Subject:             {summary['subject_breakdown']}")
+    if "level_breakdown" in summary:
+        print(f"By Level:               {summary['level_breakdown']}")
     print(
         f"Execution Time:         single={_format_duration(summary['single_duration_seconds'])}, "
         f"debate={_format_duration(summary['debate_duration_seconds'])}, "

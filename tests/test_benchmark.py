@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +17,7 @@ from gsm8k_debate.benchmark import (
     save_benchmark_outputs,
     summarize_benchmark,
 )
-from gsm8k_debate.dataset import GSM8KSample
+from gsm8k_debate.dataset import MathSample
 
 
 def test_classify_outcome() -> None:
@@ -33,16 +32,20 @@ def test_build_comparison_dataframe_and_summarize() -> None:
         [
             {
                 "index": 0,
-                "ground_truth": Decimal(14),
-                "boxed_raw": "11",
-                "predicted": Decimal(11),
+                "subject": "Algebra",
+                "level": 3,
+                "ground_truth": r"\frac{14}{3}",
+                "boxed_raw": "4",
+                "predicted": "4",
                 "is_correct": False,
             },
             {
                 "index": 1,
-                "ground_truth": Decimal(8),
+                "subject": "Number Theory",
+                "level": 5,
+                "ground_truth": "8",
                 "boxed_raw": "8",
-                "predicted": Decimal(8),
+                "predicted": "8",
                 "is_correct": True,
             },
         ]
@@ -51,22 +54,20 @@ def test_build_comparison_dataframe_and_summarize() -> None:
         [
             {
                 "index": 0,
-                "ground_truth": Decimal(14),
-                "round_1_majority": Decimal(11),
-                "round_2_majority": Decimal(14),
-                "round_3_majority": Decimal(14),
-                "consensus_answer": Decimal(14),
+                "round_1_majority": "4",
+                "round_2_majority": r"\frac{14}{3}",
+                "round_3_majority": r"\frac{14}{3}",
+                "consensus_answer": r"\frac{14}{3}",
                 "is_correct": True,
                 "had_tie": False,
                 "answer_changes": 2,
             },
             {
                 "index": 1,
-                "ground_truth": Decimal(8),
-                "round_1_majority": Decimal(8),
-                "round_2_majority": Decimal(8),
-                "round_3_majority": Decimal(8),
-                "consensus_answer": Decimal(8),
+                "round_1_majority": "8",
+                "round_2_majority": "8",
+                "round_3_majority": "8",
+                "consensus_answer": "8",
                 "is_correct": True,
                 "had_tie": False,
                 "answer_changes": 0,
@@ -76,6 +77,8 @@ def test_build_comparison_dataframe_and_summarize() -> None:
 
     comp = build_comparison_dataframe(single_df, debate_df, num_rounds=3)
     assert list(comp["outcome"]) == ["debate_rescued", "both_correct"]
+    assert list(comp["subject"]) == ["Algebra", "Number Theory"]
+    assert list(comp["level"]) == [3, 5]
 
     summary = summarize_benchmark(
         comp,
@@ -92,6 +95,7 @@ def test_build_comparison_dataframe_and_summarize() -> None:
         num_agents=3,
         num_rounds=3,
     )
+    assert summary["dataset"] == "HuggingFaceH4/MATH-500"
     assert summary["single_agent_accuracy"] == pytest.approx(0.5)
     assert summary["debate_accuracy"] == pytest.approx(1.0)
     assert summary["accuracy_delta"] == pytest.approx(0.5)
@@ -101,15 +105,19 @@ def test_build_comparison_dataframe_and_summarize() -> None:
     assert summary["debate_max_api_calls"] == 18
     assert summary["single_error_breakdown"]["conceptual_logic_error"] == 1
     assert summary["debate_error_breakdown"]["arithmetic_slip"] == 0
+    assert summary["subject_breakdown"]["Algebra"]["accuracy_delta"] == pytest.approx(1.0)
+    assert summary["level_breakdown"]["3"]["debate_accuracy"] == pytest.approx(1.0)
 
 
 def test_run_benchmark_comparison_end_to_end(tmp_path: Path) -> None:
     samples = [
-        GSM8KSample(
+        MathSample(
             index=0,
-            question="What is 3 * 4 + 2?",
-            raw_answer="#### 14",
-            ground_truth=Decimal(14),
+            question="Rationalize $\\frac{1}{\\sqrt{2}}$.",
+            raw_answer=r"\boxed{\frac{\sqrt{2}}{2}}",
+            ground_truth=r"\frac{\sqrt{2}}{2}",
+            subject="Algebra",
+            level=2,
         )
     ]
 
@@ -126,16 +134,17 @@ def test_run_benchmark_comparison_end_to_end(tmp_path: Path) -> None:
         ) -> SimpleNamespace:
             del model, config
             if isinstance(contents, str):
-                # Single-agent call gets it wrong (11).
-                return SimpleNamespace(text=r"3*4=11? \boxed{11}")
+                return SimpleNamespace(text=r"Wrong rationalization: \boxed{2}")
 
             round_num = (len(contents) + 1) // 2
             if round_num == 1:
                 self.r1_calls += 1
                 if self.r1_calls == 1:
-                    return SimpleNamespace(text=r"AGENT1_R1 \boxed{11}")
-                return SimpleNamespace(text=r"AGENT_CORRECT_R1 \boxed{14}")
-            return SimpleNamespace(text=r"Updated after reading peers: \boxed{14}")
+                    return SimpleNamespace(text=r"AGENT1_R1 \boxed{2}")
+                return SimpleNamespace(text=r"AGENT_CORRECT_R1 \boxed{\frac{1}{\sqrt{2}}}")
+            return SimpleNamespace(
+                text=r"Updated after reading peers: \boxed{\frac{\sqrt{2}}{2}}"
+            )
 
     fake_client = SimpleNamespace(aio=SimpleNamespace(models=_FakeBenchmarkModels()))
     comp_df, summary, debate_results, _, _ = asyncio.run(

@@ -5,15 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gsm8k-debate"
 version = "0.1.0"
-description = "Async multi-agent debate benchmark on GSM8K using the Google GenAI SDK."
+description = "Async multi-agent debate benchmark on MATH-500 using the Google GenAI SDK."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "antlr4-python3-runtime>=4.11,<4.12",
     "datasets>=2.18.0",
     "google-genai>=1.0.0",
     "httpx>=0.27.0",
     "pandas>=2.0.0",
     "python-dotenv>=1.0.0",
+    "sympy>=1.13.0",
 ]
 
 [project.optional-dependencies]

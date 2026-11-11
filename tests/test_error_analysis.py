@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 from gsm8k_debate.error_analysis import (
     ERROR_API,
     ERROR_ARITHMETIC_SLIP,
@@ -23,8 +21,18 @@ def test_find_arithmetic_slips_detects_real_mismatches() -> None:
     assert "expected 9" in slips[0]
 
 
-def test_find_arithmetic_slips_allows_rounding_and_percentages() -> None:
-    good_text = "50% * 20 = 10.\n10 / 3 = 3.33.\n$16 - $7 = $9."
+def test_find_arithmetic_slips_ignores_latex_structure_and_valid_math() -> None:
+    good_text = (
+        "50% * 20 = 10.\n"
+        "10 / 3 = 3.33.\n"
+        "$16 - $7 = $9.\n"
+        "2^3 + 1 = 9.\n"
+        "1 + 2^3 = 9.\n"
+        "2^10 + 1 = 1025.\n"
+        "a_1 + 2 = 3.\n"
+        "4! + 1 = 25.\n"
+        r"\frac{1}{2} + \frac{1}{2} = 1."
+    )
     assert find_arithmetic_slips(good_text) == []
 
 
@@ -32,8 +40,8 @@ def test_classify_response_error_categories() -> None:
     assert (
         classify_response_error(
             is_correct=True,
-            response_text=r"\boxed{18}",
-            predicted=Decimal(18),
+            response_text=r"\boxed{\frac{14}{3}}",
+            predicted=r"\frac{14}{3}",
         ).error_type
         == ERROR_NONE
     )
@@ -58,16 +66,15 @@ def test_classify_response_error_categories() -> None:
         classify_response_error(
             is_correct=False,
             response_text=r"3 \times 4 = 11, plus 2 = 13. \boxed{13}",
-            predicted=Decimal(13),
+            predicted="13",
         ).error_type
         == ERROR_ARITHMETIC_SLIP
     )
     assert (
         classify_response_error(
             is_correct=False,
-            response_text=r"She adds instead of subtracting: 16 + 7 = 23. \boxed{23}",
-            predicted=Decimal(23),
+            response_text=r"By wrong theorem assumption, 2^3 + 1 = 9. \boxed{9}",
+            predicted="9",
         ).error_type
         == ERROR_CONCEPTUAL_LOGIC
     )
-

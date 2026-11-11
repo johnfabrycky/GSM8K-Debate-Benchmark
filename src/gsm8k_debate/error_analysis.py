@@ -1,4 +1,4 @@
-"""Error taxonomy and heuristic arithmetic-vs-logic classification for GSM8K outputs."""
+"""Error taxonomy and heuristic arithmetic-vs-logic classification for math outputs."""
 
 from __future__ import annotations
 
@@ -23,14 +23,15 @@ ALL_ERROR_TYPES = (
 _NUM_TOKEN = r"(?:\$?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
 _OP_TOKEN = r"(?:[+\-*/×÷]|\\times|\\div|\\cdot)"
 
-# Match simple arithmetic equalities like "3 * 4 = 11" or "$16 - $7 = $8" within a line.
+# Match pure numeric equalities like "3 * 4 = 11" without firing on LaTeX exponents,
+# subscripts, fractions, or factorials (e.g., "2^3 + 1 = 9", "a_1 + 2 = 3", "4! + 1 = 25").
 _EQUATION_PATTERN = re.compile(
-    rf"(?<![A-Za-z0-9_.])"
+    rf"(?<![A-Za-z0-9_.^{{}}\\/!])"
     rf"([+-]?{_NUM_TOKEN}\s*{_OP_TOKEN}\s*"
     rf"(?:\(?[+-]?{_NUM_TOKEN}\)?(?:\s*{_OP_TOKEN}\s*\(?[+-]?{_NUM_TOKEN}\)?)*))"
     rf"\s*=\s*"
     rf"([+-]?{_NUM_TOKEN})"
-    rf"(?![A-Za-z0-9_]|\.\d)"
+    rf"(?![A-Za-z0-9_^{{}}/!]|\\.\d)"
 )
 
 
@@ -89,7 +90,7 @@ def _safe_eval_arithmetic(expr: str) -> Decimal | None:
 
 
 def find_arithmetic_slips(response_text: str) -> list[str]:
-    """Detect explicit arithmetic equation mismatches in a model's reasoning text."""
+    """Detect explicit arithmetic equation mismatches in a model's derivation text."""
     slips: list[str] = []
     for raw_line in response_text.splitlines():
         # Skip lines involving percentages so "50% * 20 = 10" isn't misread as 50 * 20.
@@ -119,7 +120,7 @@ def classify_response_error(
     *,
     is_correct: bool,
     response_text: str,
-    predicted: Decimal | None,
+    predicted: str | Decimal | None,
     error_message: str | None = None,
 ) -> ErrorClassification:
     """Classify why a model output was incorrect (or return 'none' if correct)."""
@@ -130,7 +131,7 @@ def classify_response_error(
     if predicted is None:
         return ErrorClassification(
             error_type=ERROR_FORMAT_PARSE,
-            detail="Missing or unparseable \\boxed{answer}",
+            detail="Missing or empty \\boxed{answer}",
         )
 
     slips = find_arithmetic_slips(response_text)
@@ -142,5 +143,5 @@ def classify_response_error(
 
     return ErrorClassification(
         error_type=ERROR_CONCEPTUAL_LOGIC,
-        detail="Arithmetic steps valid/unflagged, but problem formulation or logic differs",
+        detail="Arithmetic steps valid/unflagged, but proof, algebra, or logic differs",
     )

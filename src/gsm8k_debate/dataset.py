@@ -1,9 +1,8 @@
-"""Dataset loading utilities for GSM8K."""
+"""Dataset loading utilities for HuggingFaceH4/MATH-500."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
 
 from datasets import load_dataset
 
@@ -11,44 +10,82 @@ from gsm8k_debate.parsing import extract_ground_truth_answer
 
 
 @dataclass(frozen=True)
-class GSM8KSample:
-    """Single GSM8K math word problem and its parsed numerical ground truth."""
+class MathSample:
+    """Single MATH-500 competition math problem and its reference solution/answer."""
 
     index: int
     question: str
     raw_answer: str
-    ground_truth: Decimal
+    ground_truth: str
+    subject: str | None = None
+    level: int | None = None
+    unique_id: str | None = None
 
 
-def load_gsm8k_subset(
-    num_samples: int = 15,
+# Preserve symbol alias for existing downstream imports/tests.
+GSM8KSample = MathSample
+
+
+def load_math500_subset(
+    num_samples: int | None = 15,
     *,
     split: str = "test",
     shuffle: bool = False,
     seed: int = 42,
-) -> list[GSM8KSample]:
-    """Load a subset of ``openai/gsm8k`` (main configuration) from Hugging Face datasets."""
-    if num_samples <= 0:
+    subject: str | None = None,
+    level: int | None = None,
+) -> list[MathSample]:
+    """Load a subset of ``HuggingFaceH4/MATH-500`` from Hugging Face datasets."""
+    if num_samples is not None and num_samples <= 0:
         raise ValueError(f"num_samples must be positive, got {num_samples}")
+    if level is not None and level <= 0:
+        raise ValueError(f"level must be positive, got {level}")
 
-    dataset = load_dataset("openai/gsm8k", "main", split=split)
+    dataset = load_dataset("HuggingFaceH4/MATH-500", split=split)
+
+    if subject is not None:
+        target_subject = subject.strip().lower()
+        dataset = dataset.filter(
+            lambda row: str(row.get("subject", "")).strip().lower() == target_subject
+        )
+
+    if level is not None:
+        dataset = dataset.filter(lambda row: int(row.get("level", -1)) == level)
+
     if shuffle:
         dataset = dataset.shuffle(seed=seed)
 
-    count = min(num_samples, len(dataset))
+    count = len(dataset) if num_samples is None else min(num_samples, len(dataset))
     subset = dataset.select(range(count))
 
-    samples: list[GSM8KSample] = []
+    samples: list[MathSample] = []
     for idx, row in enumerate(subset):
-        question = str(row["question"])
-        raw_answer = str(row["answer"])
+        question = str(row.get("problem") if "problem" in row else row["question"])
+        raw_solution = str(
+            row.get("solution") if "solution" in row else row.get("answer", "")
+        )
+        raw_explicit_answer = row.get("answer")
+        if raw_explicit_answer is not None and str(raw_explicit_answer).strip():
+            ground_truth = str(raw_explicit_answer).strip()
+        else:
+            ground_truth = extract_ground_truth_answer(raw_solution)
+
+        row_subject = row.get("subject")
+        row_level = row.get("level")
+        row_unique_id = row.get("unique_id")
         samples.append(
-            GSM8KSample(
+            MathSample(
                 index=idx,
                 question=question,
-                raw_answer=raw_answer,
-                ground_truth=extract_ground_truth_answer(raw_answer),
+                raw_answer=raw_solution,
+                ground_truth=ground_truth,
+                subject=str(row_subject) if row_subject is not None else None,
+                level=int(row_level) if row_level is not None else None,
+                unique_id=str(row_unique_id) if row_unique_id is not None else None,
             )
         )
     return samples
 
+
+# Preserve legacy loader function name while pointing it at MATH-500.
+load_gsm8k_subset = load_math500_subset

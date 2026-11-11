@@ -1,4 +1,4 @@
-"""Run multi-agent Gemini Flash debate on a subset of the GSM8K test split."""
+"""Run multi-agent Gemini Flash debate on a subset of HuggingFaceH4/MATH-500."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from gsm8k_debate.checkpoint import PreemptionMonitor, atomic_write_via
-from gsm8k_debate.dataset import load_gsm8k_subset
+from gsm8k_debate.dataset import load_math500_subset
 from gsm8k_debate.debate import (
     DEFAULT_DEBATE_TEMPERATURE,
     DEFAULT_NUM_AGENTS,
@@ -23,13 +23,25 @@ from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run multi-agent debate (Du et al.) on a GSM8K test subset."
+        description="Run multi-agent debate (Du et al.) on a MATH-500 test subset."
     )
     parser.add_argument(
         "--num-samples",
         type=int,
         default=5,
-        help="Number of GSM8K test samples to evaluate (default: 5).",
+        help="Number of MATH-500 test samples to evaluate (default: 5).",
+    )
+    parser.add_argument(
+        "--subject",
+        type=str,
+        default=None,
+        help="Optional MATH-500 subject filter (e.g., Algebra, Number Theory, Precalculus).",
+    )
+    parser.add_argument(
+        "--level",
+        type=int,
+        default=None,
+        help="Optional MATH-500 difficulty level filter (1-5).",
     )
     parser.add_argument(
         "--num-agents",
@@ -41,7 +53,10 @@ def parse_args() -> argparse.Namespace:
         "--num-rounds",
         type=int,
         default=DEFAULT_NUM_ROUNDS,
-        help=f"Number of debate rounds (default: {DEFAULT_NUM_ROUNDS}).",
+        help=(
+            "Total turns per sample: Round 1 initial + (N-1) peer-debate rounds "
+            f"(default: {DEFAULT_NUM_ROUNDS}, i.e., 1 initial + 2 debate rounds)."
+        ),
     )
     parser.add_argument(
         "--model",
@@ -87,8 +102,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-file",
         type=Path,
-        default=Path("logs/debate_checkpoint.jsonl"),
-        help="Incremental round-level JSONL checkpoint path (default: logs/debate_checkpoint.jsonl).",
+        default=Path("logs/math500/debate_checkpoint.jsonl"),
+        help=(
+            "Incremental round-level JSONL checkpoint path "
+            "(default: logs/math500/debate_checkpoint.jsonl)."
+        ),
     )
     parser.add_argument(
         "--resume",
@@ -98,8 +116,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-file",
         type=Path,
-        default=Path("logs/debate_logs.json"),
-        help="Path to save intermediate round-by-round JSON logs (default: logs/debate_logs.json).",
+        default=Path("logs/math500/debate_logs.json"),
+        help=(
+            "Path to save intermediate round-by-round JSON logs "
+            "(default: logs/math500/debate_logs.json)."
+        ),
     )
     parser.add_argument(
         "--show-logs",
@@ -122,12 +143,14 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
-    print(f"Loading {args.num_samples} GSM8K test samples from Hugging Face datasets...")
-    samples = load_gsm8k_subset(
+    print(f"Loading {args.num_samples} samples from HuggingFaceH4/MATH-500 (test)...")
+    samples = load_math500_subset(
         num_samples=args.num_samples,
         split="test",
         shuffle=args.shuffle,
         seed=args.seed,
+        subject=args.subject,
+        level=args.level,
     )
 
     total_calls = len(samples) * args.num_agents * args.num_rounds
@@ -135,7 +158,7 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     resume_note = f", resume={args.resume}" if args.resume else ""
     print(
         f"Running {args.num_agents}-agent, {args.num_rounds}-round debate on {len(samples)} "
-        f"samples (~{total_calls} max API calls, model={args.model}, "
+        f"MATH-500 samples (~{total_calls} max API calls, model={args.model}, "
         f"max_concurrency={args.max_concurrency}{rpm_note}{resume_note})..."
     )
 
@@ -167,6 +190,7 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
         print(df.to_string(index=False))
 
     print("\n=== Debate Metrics ===")
+    print("Dataset:                  HuggingFaceH4/MATH-500")
     print(f"Model:                    {metrics['model']}")
     print(f"Agents x Rounds:          {metrics['num_agents']} x {metrics['num_rounds']}")
     print(f"Samples:                  {metrics['total']} / {metrics['requested']}")

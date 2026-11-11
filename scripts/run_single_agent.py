@@ -1,4 +1,4 @@
-"""Run single-agent Gemini Flash evaluation on a subset of the GSM8K test split."""
+"""Run single-agent Gemini Flash evaluation on a subset of HuggingFaceH4/MATH-500."""
 
 from __future__ import annotations
 
@@ -8,19 +8,31 @@ import sys
 from pathlib import Path
 
 from gsm8k_debate.checkpoint import PreemptionMonitor, atomic_write_via
-from gsm8k_debate.dataset import load_gsm8k_subset
-from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL, evaluate_gsm8k_subset
+from gsm8k_debate.dataset import load_math500_subset
+from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL, evaluate_math_subset
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate single-agent Gemini Flash on a GSM8K test subset."
+        description="Evaluate single-agent Gemini Flash on a MATH-500 subset."
     )
     parser.add_argument(
         "--num-samples",
         type=int,
         default=15,
-        help="Number of GSM8K test samples to evaluate (default: 15).",
+        help="Number of MATH-500 test samples to evaluate (default: 15).",
+    )
+    parser.add_argument(
+        "--subject",
+        type=str,
+        default=None,
+        help="Optional MATH-500 subject filter (e.g., Algebra, Number Theory, Precalculus).",
+    )
+    parser.add_argument(
+        "--level",
+        type=int,
+        default=None,
+        help="Optional MATH-500 difficulty level filter (1-5).",
     )
     parser.add_argument(
         "--model",
@@ -60,8 +72,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-file",
         type=Path,
-        default=Path("logs/single_agent_checkpoint.jsonl"),
-        help="Incremental JSONL checkpoint path (default: logs/single_agent_checkpoint.jsonl).",
+        default=Path("logs/math500/single_agent_checkpoint.jsonl"),
+        help=(
+            "Incremental JSONL checkpoint path "
+            "(default: logs/math500/single_agent_checkpoint.jsonl)."
+        ),
     )
     parser.add_argument(
         "--resume",
@@ -87,20 +102,23 @@ def _truncate(val: object, limit: int = 60) -> str:
 
 
 async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> int:
-    print(f"Loading {args.num_samples} GSM8K test samples from Hugging Face datasets...")
-    samples = load_gsm8k_subset(
+    print(f"Loading {args.num_samples} samples from HuggingFaceH4/MATH-500 (test)...")
+    samples = load_math500_subset(
         num_samples=args.num_samples,
         split="test",
         shuffle=args.shuffle,
         seed=args.seed,
+        subject=args.subject,
+        level=args.level,
     )
 
     rpm_note = f", rpm={args.rpm}" if args.rpm is not None else ""
     resume_note = f", resume={args.resume}" if args.resume else ""
     print(
-        f"Querying {args.model} (max_concurrency={args.max_concurrency}{rpm_note}{resume_note})..."
+        f"Querying {args.model} on {len(samples)} samples "
+        f"(max_concurrency={args.max_concurrency}{rpm_note}{resume_note})..."
     )
-    df, metrics = await evaluate_gsm8k_subset(
+    df, metrics = await evaluate_math_subset(
         samples,
         model=args.model,
         max_concurrency=args.max_concurrency,
@@ -112,19 +130,22 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     )
 
     if not df.empty:
-        display_df = df[["index", "ground_truth", "boxed_raw", "predicted", "is_correct"]].copy()
+        display_df = df[
+            ["index", "subject", "level", "ground_truth", "boxed_raw", "predicted", "is_correct"]
+        ].copy()
         display_df["error"] = df["error"].map(_truncate)
         print("\n=== Per-Sample Results ===")
         print(display_df.to_string(index=False))
 
     print("\n=== Accuracy Metrics ===")
+    print("Dataset:        HuggingFaceH4/MATH-500")
     print(f"Model:          {metrics['model']}")
     print(f"Samples:        {metrics['total']} / {metrics['requested']}")
     print(f"Correct:        {metrics['correct']} / {metrics['total']}")
     print(f"Accuracy:       {metrics['accuracy']:.2%}")
     print(f"Boxed Parsed:   {metrics['boxed_parsed']} / {metrics['total']}")
     print(
-        f"Numeric Parsed: {metrics['numeric_parsed']} / {metrics['total']} "
+        f"Parsed Answers: {metrics['parsed_answers']} / {metrics['total']} "
         f"({metrics['parse_rate']:.2%})"
     )
     print(f"API Errors:     {metrics['errors']}")
