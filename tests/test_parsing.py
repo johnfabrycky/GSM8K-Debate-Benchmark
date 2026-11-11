@@ -135,7 +135,7 @@ def test_answers_match_aime_and_legacy_helpers() -> None:
     assert extract_boxed_number(r"\boxed{033}") == Decimal(33)
 
 
-def test_load_aime_subset_supports_aimo_and_historical_schemas(
+def test_load_aime_subset_defaults_to_hardest_problems_and_supports_all_schemas(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     aimo_rows = [
@@ -152,6 +152,13 @@ def test_load_aime_subset_supports_aimo_and_historical_schemas(
             "solution": r"Simple case gives \framebox{4}.",
             "answer": "",
             "url": "https://artofproblemsolving.com/wiki/index.php/2023_AIME_I_Problems/Problem_3",
+        },
+        {
+            "id": 2,
+            "problem": "Hard combinatorics.",
+            "solution": r"Casework yields \boxed{150}.",
+            "answer": "150",
+            "url": "https://artofproblemsolving.com/wiki/index.php/2022_AIME_I_Problems/Problem_11",
         },
     ]
     historical_rows = [
@@ -171,6 +178,14 @@ def test_load_aime_subset_supports_aimo_and_historical_schemas(
             "Answer": "080 or 081 (both were accepted)",
             "Part": "II",
         },
+        {
+            "ID": "2024-II-14",
+            "Year": 2024,
+            "Problem Number": 14,
+            "Question": "Hard historical problem.",
+            "Answer": "7",
+            "Part": "II",
+        },
     ]
 
     def _fake_load(name: str, split: str = "train"):
@@ -181,26 +196,40 @@ def test_load_aime_subset_supports_aimo_and_historical_schemas(
 
     monkeypatch.setattr("gsm8k_debate.dataset.load_dataset", _fake_load)
 
-    aimo_loaded = load_aime_subset(num_samples=5)
-    assert len(aimo_loaded) == 2
-    assert aimo_loaded[0].ground_truth == "033"
-    assert aimo_loaded[0].year == 2024
-    assert aimo_loaded[0].part == "II"
-    assert aimo_loaded[0].problem_number == 15
-    assert aimo_loaded[0].unique_id == "2024-II-15"
-    assert aimo_loaded[1].ground_truth == "004"
+    # Default filter keeps only problems 11-15.
+    aimo_hard = load_aime_subset(num_samples=5)
+    assert [sample.unique_id for sample in aimo_hard] == ["2024-II-15", "2022-I-11"]
+    assert all(11 <= (sample.problem_number or 0) <= 15 for sample in aimo_hard)
+    assert aimo_hard[0].ground_truth == "033"
+    assert aimo_hard[0].year == 2024
+    assert aimo_hard[0].part == "II"
+    assert aimo_hard[0].problem_number == 15
 
-    hard_only = load_aime_subset(num_samples=5, year=2024, min_problem=10)
-    assert len(hard_only) == 1
-    assert hard_only[0].unique_id == "2024-II-15"
+    # Explicit override can still load problems 1-15.
+    aimo_all = load_aime_subset(num_samples=5, min_problem=1, max_problem=15)
+    assert [sample.unique_id for sample in aimo_all] == ["2024-II-15", "2023-I-3", "2022-I-11"]
+    assert aimo_all[1].ground_truth == "004"
 
-    hist_loaded = load_aime_subset(
+    year_hard = load_aime_subset(num_samples=5, year=2024)
+    assert len(year_hard) == 1
+    assert year_hard[0].unique_id == "2024-II-15"
+
+    hist_hard = load_aime_subset(
         num_samples=5, dataset_name="di-zhang-fdu/AIME_1983_2024"
     )
-    assert hist_loaded[0].ground_truth == "060"
-    assert hist_loaded[0].unique_id == "1983-1"
-    assert hist_loaded[1].ground_truth == "080"
-    assert hist_loaded[1].accepted_answers == ("080", "081")
+    assert [sample.unique_id for sample in hist_hard] == ["2024-II-14"]
+    assert hist_hard[0].ground_truth == "007"
+
+    hist_all = load_aime_subset(
+        num_samples=5,
+        dataset_name="di-zhang-fdu/AIME_1983_2024",
+        min_problem=None,
+        max_problem=None,
+    )
+    assert hist_all[0].ground_truth == "060"
+    assert hist_all[0].unique_id == "1983-1"
+    assert hist_all[1].ground_truth == "080"
+    assert hist_all[1].accepted_answers == ("080", "081")
 
 
 def test_evaluate_aime_subset_with_mocked_client() -> None:

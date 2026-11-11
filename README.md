@@ -1,6 +1,6 @@
 # math-debate (AIME Olympiad Benchmark)
 
-Async multi-agent debate benchmark on Hugging Face AIME datasets (default: `AI-MO/aimo-validation-aime`; also supports `di-zhang-fdu/AIME_1983_2024` and `HuggingFaceH4/aime_2024`) using Python 3.10+, 3-digit integer answer normalization (`000`–`999`), and the `google-genai` SDK.
+Async multi-agent debate benchmark on Hugging Face AIME datasets (default: `AI-MO/aimo-validation-aime`, filtered to the hardest problems `11`–`15` per contest/year; also supports `di-zhang-fdu/AIME_1983_2024` and `HuggingFaceH4/aime_2024`) using Python 3.10+, 3-digit integer answer normalization (`000`–`999`), and the `google-genai` SDK.
 
 ## Setup
 
@@ -53,21 +53,23 @@ pytest
 
 ### 4. Run single-agent AIME baseline
 
-Evaluate Gemini Flash on an AIME subset (default: 15 problems from `AI-MO/aimo-validation-aime`):
+By default, all evaluation scripts filter to **only the hardest AIME problems (`11`–`15` per contest/year)** — 30 problems across 2022–2024 AIME I & II in `AI-MO/aimo-validation-aime` (10 per year), or 310 historical problems in `di-zhang-fdu/AIME_1983_2024`.
+
+Evaluate Gemini Flash on 15 hard AIME problems (`11`–`15`) from `AI-MO/aimo-validation-aime`:
 
 ```powershell
 python scripts/run_single_agent.py --num-samples 15
 ```
 
-You can also filter by competition year or problem number tier (`1`–`15`), or switch datasets (e.g., `di-zhang-fdu/AIME_1983_2024`):
+You can also filter by competition year (e.g., all 10 problems `11`–`15` in 2024 AIME I & II), override the problem range (`--min-problem 1 --max-problem 15`), or switch datasets (e.g., `di-zhang-fdu/AIME_1983_2024`):
 
 ```powershell
-python scripts/run_single_agent.py --year 2024 --min-problem 10 --num-samples 15
+python scripts/run_single_agent.py --year 2024 --num-samples 10
 ```
 
 ### 5. Run multi-agent debate (Du et al.)
 
-Run the 3-agent async debate loop (Round 1 independent Olympiad proof + Rounds 2 & 3 peer-debate rounds) and inspect the intermediate logs (`logs/aime/debate_logs.json`):
+Run the 3-agent async debate loop on hard AIME problems (`11`–`15`; Round 1 independent Olympiad proof + Rounds 2 & 3 peer-debate rounds) and inspect the intermediate logs (`logs/aime/debate_logs.json`):
 
 ```powershell
 python scripts/run_debate.py --num-samples 5 --show-logs 2
@@ -97,13 +99,13 @@ python scripts/inspect_logs.py --log-file logs/aime/debate_logs.json --show-prom
 
 ### 8. Side-by-side Single-Agent vs. Debate benchmark
 
-Compare Single-Agent baseline against 3-Agent Multi-Round Debate on all 90 validation problems of `AI-MO/aimo-validation-aime` (`--resume` reuses checkpoints in `logs/aime`), logging 3-digit `000`–`999` accuracy, answer changes, error types (`arithmetic_slip` vs. `conceptual_logic_error`), year/difficulty-tier breakdowns (`Problems 01-05`, `06-10`, `11-15`), and execution time to `results/aime/`:
+Compare Single-Agent baseline against 3-Agent Multi-Round Debate across all **30** hard AIME problems (`11`–`15` across 2022–2024 in `AI-MO/aimo-validation-aime`; `--resume` reuses checkpoints in `logs/aime`), logging 3-digit `000`–`999` accuracy, answer changes, error types (`arithmetic_slip` vs. `conceptual_logic_error`), year/difficulty-tier breakdowns, and execution time to `results/aime/`:
 
 ```powershell
-python scripts/run_benchmark.py --num-samples 90 --max-concurrency 15 --resume
+python scripts/run_benchmark.py --num-samples 30 --max-concurrency 15 --resume
 ```
 
-To run 100+ historical AIME problems (`1983`–`2024`):
+To benchmark 100 hard historical AIME problems (`11`–`15` across `1983`–`2024`):
 
 ```powershell
 python scripts/run_benchmark.py --dataset di-zhang-fdu/AIME_1983_2024 --num-samples 100 --shuffle --max-concurrency 15 --resume
@@ -112,5 +114,5 @@ python scripts/run_benchmark.py --dataset di-zhang-fdu/AIME_1983_2024 --num-samp
 For Free Tier quotas (e.g., 5 RPM), pass `--rpm 4` so requests are spaced smoothly without `429` bursts:
 
 ```powershell
-python scripts/run_benchmark.py --num-samples 90 --rpm 4 --resume
+python scripts/run_benchmark.py --num-samples 30 --rpm 4 --resume
 ```

@@ -17,6 +17,8 @@ from gsm8k_debate.parsing import (
 
 DEFAULT_AIME_DATASET = "AI-MO/aimo-validation-aime"
 DEFAULT_AIME_SPLIT = "train"
+DEFAULT_MIN_PROBLEM = 11
+DEFAULT_MAX_PROBLEM = 15
 
 _AOPS_URL_META_PATTERN = re.compile(r"(\d{4})_AIME_(I|II)_Problems/Problem_(\d+)")
 
@@ -132,10 +134,10 @@ def load_aime_subset(
     shuffle: bool = False,
     seed: int = 42,
     year: int | None = None,
-    min_problem: int | None = None,
-    max_problem: int | None = None,
+    min_problem: int | None = DEFAULT_MIN_PROBLEM,
+    max_problem: int | None = DEFAULT_MAX_PROBLEM,
 ) -> list[MathSample]:
-    """Load an AIME problem subset from Hugging Face and normalize 000-999 integer answers."""
+    """Load an AIME problem subset (default: hardest problems 11-15 per year) and normalize 000-999 answers."""
     if num_samples is not None and num_samples <= 0:
         raise ValueError(f"num_samples must be positive, got {num_samples}")
     if year is not None and year <= 0:

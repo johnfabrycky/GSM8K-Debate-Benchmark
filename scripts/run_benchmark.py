@@ -13,6 +13,8 @@ from gsm8k_debate.checkpoint import PreemptionMonitor
 from gsm8k_debate.dataset import (
     DEFAULT_AIME_DATASET,
     DEFAULT_AIME_SPLIT,
+    DEFAULT_MAX_PROBLEM,
+    DEFAULT_MIN_PROBLEM,
     load_aime_subset,
 )
 from gsm8k_debate.debate import DEFAULT_DEBATE_TEMPERATURE, DEFAULT_NUM_AGENTS, DEFAULT_NUM_ROUNDS
@@ -41,10 +43,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-samples",
         type=int,
-        default=90,
+        default=30,
         help=(
-            "Number of AIME problems to benchmark (default: 90, covering the full "
-            "AI-MO/aimo-validation-aime validation set)."
+            "Number of hard AIME problems (11-15) to benchmark (default: 30, covering "
+            "all problems 11-15 across 2022-2024 in AI-MO/aimo-validation-aime)."
         ),
     )
     parser.add_argument(
@@ -56,14 +58,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-problem",
         type=int,
-        default=None,
-        help="Optional minimum AIME problem number filter (1-15).",
+        default=DEFAULT_MIN_PROBLEM,
+        help=(
+            f"Minimum AIME problem number filter (1-15, default: {DEFAULT_MIN_PROBLEM} "
+            "for the hardest problems 11-15 per year)."
+        ),
     )
     parser.add_argument(
         "--max-problem",
         type=int,
-        default=None,
-        help="Optional maximum AIME problem number filter (1-15).",
+        default=DEFAULT_MAX_PROBLEM,
+        help=(
+            f"Maximum AIME problem number filter (1-15, default: {DEFAULT_MAX_PROBLEM} "
+            "for the hardest problems 11-15 per year)."
+        ),
     )
     parser.add_argument(
         "--num-agents",
@@ -166,7 +174,10 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
-    print(f"Loading up to {args.num_samples} samples from {args.dataset} ({args.split})...")
+    print(
+        f"Loading up to {args.num_samples} samples (problems {args.min_problem}-{args.max_problem}) "
+        f"from {args.dataset} ({args.split})..."
+    )
     samples = load_aime_subset(
         num_samples=args.num_samples,
         dataset_name=args.dataset,

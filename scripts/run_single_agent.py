@@ -11,6 +11,8 @@ from gsm8k_debate.checkpoint import PreemptionMonitor, atomic_write_via
 from gsm8k_debate.dataset import (
     DEFAULT_AIME_DATASET,
     DEFAULT_AIME_SPLIT,
+    DEFAULT_MAX_PROBLEM,
+    DEFAULT_MIN_PROBLEM,
     load_aime_subset,
 )
 from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL, evaluate_aime_subset
@@ -39,7 +41,7 @@ def parse_args() -> argparse.Namespace:
         "--num-samples",
         type=int,
         default=15,
-        help="Number of AIME samples to evaluate (default: 15).",
+        help="Number of hard AIME problems (11-15) to evaluate (default: 15).",
     )
     parser.add_argument(
         "--year",
@@ -50,14 +52,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-problem",
         type=int,
-        default=None,
-        help="Optional minimum AIME problem number filter (1-15).",
+        default=DEFAULT_MIN_PROBLEM,
+        help=(
+            f"Minimum AIME problem number filter (1-15, default: {DEFAULT_MIN_PROBLEM} "
+            "for the hardest problems 11-15 per year)."
+        ),
     )
     parser.add_argument(
         "--max-problem",
         type=int,
-        default=None,
-        help="Optional maximum AIME problem number filter (1-15).",
+        default=DEFAULT_MAX_PROBLEM,
+        help=(
+            f"Maximum AIME problem number filter (1-15, default: {DEFAULT_MAX_PROBLEM} "
+            "for the hardest problems 11-15 per year)."
+        ),
     )
     parser.add_argument(
         "--model",
@@ -127,7 +135,10 @@ def _truncate(val: object, limit: int = 60) -> str:
 
 
 async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> int:
-    print(f"Loading up to {args.num_samples} samples from {args.dataset} ({args.split})...")
+    print(
+        f"Loading up to {args.num_samples} samples (problems {args.min_problem}-{args.max_problem}) "
+        f"from {args.dataset} ({args.split})..."
+    )
     samples = load_aime_subset(
         num_samples=args.num_samples,
         dataset_name=args.dataset,

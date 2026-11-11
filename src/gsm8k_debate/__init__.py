@@ -11,6 +11,8 @@ from gsm8k_debate.checkpoint import PreemptionMonitor, PreemptionRequestedError
 from gsm8k_debate.config import create_genai_client, get_gemini_api_key
 from gsm8k_debate.dataset import (
     DEFAULT_AIME_DATASET,
+    DEFAULT_MAX_PROBLEM,
+    DEFAULT_MIN_PROBLEM,
     AimeSample,
     GSM8KSample,
     MathSample,
@@ -66,6 +68,8 @@ __all__ = [
     "DEFAULT_AIME_DATASET",
     "DEFAULT_DEBATE_TEMPERATURE",
     "DEFAULT_FLASH_MODEL",
+    "DEFAULT_MAX_PROBLEM",
+    "DEFAULT_MIN_PROBLEM",
     "DEFAULT_NUM_AGENTS",
     "DEFAULT_NUM_ROUNDS",
     "AgentRoundLog",
