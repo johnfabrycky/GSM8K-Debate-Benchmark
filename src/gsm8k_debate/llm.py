@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Sequence
 
@@ -12,6 +13,8 @@ from google import genai
 from google.genai import errors, types
 
 from gsm8k_debate.checkpoint import PreemptionRequestedError, sleep_unless_preempted
+
+logger = logging.getLogger(__name__)
 
 _RETRY_IN_PATTERN = re.compile(r"retry in (\d+(?:\.\d+)?)s", re.IGNORECASE)
 _RETRY_DELAY_PATTERN = re.compile(r"['\"]retryDelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]")
@@ -26,12 +29,22 @@ def extract_retry_delay_seconds(exc: BaseException) -> float | None:
     return min(float(match.group(1)) + 1.0, 65.0)
 
 
+def is_daily_quota_error(exc: BaseException) -> bool:
+    """Return True if a 429 error indicates a daily/project quota ceiling rather than RPM."""
+    if not isinstance(exc, errors.ClientError) or getattr(exc, "code", None) != 429:
+        return False
+    msg = str(exc)
+    return "PerDay" in msg or "Daily" in msg
+
+
 def is_retryable_error(exc: BaseException) -> bool:
-    """Return True for transient network, 5xx, or 429 rate-limit errors."""
+    """Return True for transient network, 5xx, or non-daily 429 rate-limit errors."""
     if isinstance(exc, errors.ServerError):
         return True
     if isinstance(exc, errors.ClientError):
-        return getattr(exc, "code", None) == 429
+        if getattr(exc, "code", None) != 429:
+            return False
+        return not is_daily_quota_error(exc)
     return isinstance(exc, (httpx.HTTPError, httpx2.HTTPError, OSError, TimeoutError))
 
 
@@ -98,12 +111,25 @@ async def generate_content_with_retry(
             OSError,
             TimeoutError,
         ) as exc:
+            if is_daily_quota_error(exc):
+                raise PreemptionRequestedError(f"Daily API quota exhausted: {exc}") from exc
             if attempt >= max_retries or not is_retryable_error(exc):
+                if isinstance(exc, errors.ClientError) and getattr(exc, "code", None) == 429:
+                    raise PreemptionRequestedError(
+                        f"Rate limit (429) exhausted retries: {exc}"
+                    ) from exc
                 raise
 
             suggested_delay = extract_retry_delay_seconds(exc)
             backoff_delay = retry_base_delay * (2**attempt)
             delay = suggested_delay if suggested_delay is not None else backoff_delay
+            logger.warning(
+                "Retryable API error (%s, attempt %d/%d); sleeping %.1fs before retry.",
+                type(exc).__name__,
+                attempt + 1,
+                max_retries + 1,
+                delay,
+            )
             await sleep_unless_preempted(delay, stop_event=stop_event)
 
     raise RuntimeError("Unreachable retry loop exit")

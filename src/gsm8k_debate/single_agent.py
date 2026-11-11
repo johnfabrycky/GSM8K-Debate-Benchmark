@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from decimal import Decimal
@@ -35,6 +36,8 @@ from gsm8k_debate.parsing import (
 )
 
 DEFAULT_FLASH_MODEL = "gemini-3.7-flash"
+
+logger = logging.getLogger(__name__)
 
 SINGLE_AGENT_SYSTEM_PROMPT = (
     "You are an expert mathematical problem solver. "
@@ -214,7 +217,7 @@ async def evaluate_gsm8k_subset(
     if max_concurrency <= 0:
         raise ValueError(f"max_concurrency must be positive, got {max_concurrency}")
 
-    stop_event = preemption.bind_running_loop() if preemption is not None else None
+    stop_event = preemption.bind_running_loop() if preemption is not None else asyncio.Event()
     completed_by_index: dict[int, SingleAgentResult] = {}
 
     if checkpoint_path is not None:
@@ -231,6 +234,13 @@ async def evaluate_gsm8k_subset(
             checkpoint_path.unlink()
 
     pending_samples = [s for s in samples if s.index not in completed_by_index]
+    if resume and completed_by_index:
+        logger.info(
+            "Resuming single-agent evaluation: %d/%d samples already completed, %d remaining.",
+            len(completed_by_index),
+            len(samples),
+            len(pending_samples),
+        )
     interrupted = False
 
     if pending_samples:
@@ -253,7 +263,9 @@ async def evaluate_gsm8k_subset(
                     retry_base_delay=retry_base_delay,
                     stop_event=stop_event,
                 )
-            except PreemptionRequestedError:
+            except PreemptionRequestedError as exc:
+                logger.warning("Stopping single-agent batch cleanly: %s", exc)
+                stop_event.set()
                 return None
 
             if checkpoint_path is not None:
@@ -261,12 +273,22 @@ async def evaluate_gsm8k_subset(
             return result
 
         tasks = [asyncio.create_task(_eval_and_persist(sample)) for sample in pending_samples]
+        total_requested = len(samples)
         for completed_task in asyncio.as_completed(tasks):
             res = await completed_task
             if res is None:
                 interrupted = True
             else:
                 completed_by_index[res.index] = res
+                logger.info(
+                    "[Single-Agent %d/%d] sample=%d predicted=%s gt=%s correct=%s",
+                    len(completed_by_index),
+                    total_requested,
+                    res.index,
+                    res.predicted,
+                    res.ground_truth,
+                    res.is_correct,
+                )
 
     if stop_event is not None and stop_event.is_set():
         interrupted = True

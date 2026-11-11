@@ -1,5 +1,12 @@
 """gsm8k-debate package initialization."""
 
+from gsm8k_debate.benchmark import (
+    build_comparison_dataframe,
+    classify_outcome,
+    run_benchmark_comparison,
+    save_benchmark_outputs,
+    summarize_benchmark,
+)
 from gsm8k_debate.checkpoint import PreemptionMonitor, PreemptionRequestedError
 from gsm8k_debate.config import create_genai_client, get_gemini_api_key
 from gsm8k_debate.dataset import GSM8KSample, load_gsm8k_subset
@@ -17,6 +24,11 @@ from gsm8k_debate.debate import (
     format_debate_trace,
     run_debate_for_sample,
     save_debate_logs,
+)
+from gsm8k_debate.error_analysis import (
+    ErrorClassification,
+    classify_response_error,
+    find_arithmetic_slips,
 )
 from gsm8k_debate.parsing import (
     answers_match,
@@ -40,13 +52,17 @@ __all__ = [
     "AgentRoundLog",
     "DebateAgent",
     "DebateSampleResult",
+    "ErrorClassification",
     "GSM8KSample",
     "PreemptionMonitor",
     "PreemptionRequestedError",
     "SingleAgentResult",
     "answers_match",
+    "build_comparison_dataframe",
     "build_consensus_prompt",
     "build_round1_prompt",
+    "classify_outcome",
+    "classify_response_error",
     "compute_majority_vote",
     "create_genai_client",
     "evaluate_debate_subset",
@@ -54,11 +70,15 @@ __all__ = [
     "extract_boxed_content",
     "extract_boxed_number",
     "extract_ground_truth_answer",
+    "find_arithmetic_slips",
     "format_debate_trace",
     "get_gemini_api_key",
     "load_gsm8k_subset",
     "parse_numeric_answer",
+    "run_benchmark_comparison",
     "run_debate_for_sample",
+    "save_benchmark_outputs",
     "save_debate_logs",
     "solve_math_question",
+    "summarize_benchmark",
 ]

@@ -95,3 +95,17 @@ Inspect `logs/debate_logs.json` (completed runs) or `logs/debate_checkpoint.json
 python scripts/inspect_logs.py --log-file logs/debate_logs.json --show-prompts
 ```
 
+### 8. Side-by-side Single-Agent vs. Debate benchmark
+
+Compare Single-Agent baseline against 3-Round Debate on 100 GSM8K test instances (`--resume` reuses any existing checkpoints in `logs/`), logging accuracy, error types (`arithmetic_slip` vs. `conceptual_logic_error`), and total execution time:
+
+```powershell
+python scripts/run_benchmark.py --num-samples 100 --resume
+```
+
+For Free Tier quotas (e.g., 5 RPM), pass `--rpm 4` so requests are spaced smoothly without `429` bursts:
+
+```powershell
+python scripts/run_benchmark.py --num-samples 100 --rpm 4 --resume
+```
+

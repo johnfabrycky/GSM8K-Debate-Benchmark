@@ -506,7 +506,7 @@ async def evaluate_debate_subset(
     if max_concurrency <= 0:
         raise ValueError(f"max_concurrency must be positive, got {max_concurrency}")
 
-    stop_event = preemption.bind_running_loop() if preemption is not None else None
+    stop_event = preemption.bind_running_loop() if preemption is not None else asyncio.Event()
     checkpoints: dict[int, DebateCheckpointState] = {}
 
     if checkpoint_path is not None:
@@ -538,8 +538,31 @@ async def evaluate_debate_subset(
             continue
         reused_rounds += len(state.rounds)
 
-    active_client = client if client is not None else create_genai_client()
+    if resume and reused_rounds:
+        already_done = sum(
+            1
+            for sample in samples
+            if (st := checkpoints.get(sample.index)) is not None
+            and all(r in st.rounds for r in range(1, num_rounds + 1))
+        )
+        logger.info(
+            "Resuming debate evaluation: %d checkpointed rounds (%d/%d samples complete).",
+            reused_rounds,
+            already_done,
+            len(samples),
+        )
+
+    needs_client = any(
+        (checkpoints.get(sample.index) is None)
+        or any(r not in checkpoints[sample.index].rounds for r in range(1, num_rounds + 1))
+        for sample in samples
+    )
+    active_client: Any = (
+        client if client is not None else (create_genai_client() if needs_client else None)
+    )
     semaphore = asyncio.Semaphore(max_concurrency)
+    max_active_samples = max(1, (max_concurrency + num_agents - 1) // num_agents)
+    sample_semaphore = asyncio.Semaphore(max_active_samples)
     rate_limiter = (
         AsyncRateLimiter(requests_per_minute) if requests_per_minute is not None else None
     )
@@ -567,31 +590,47 @@ async def evaluate_debate_subset(
             )
 
         try:
-            return await run_debate_for_sample(
-                active_client,
-                sample,
-                model=model,
-                num_agents=num_agents,
-                num_rounds=num_rounds,
-                temperature=temperature,
-                semaphore=semaphore,
-                rate_limiter=rate_limiter,
-                max_retries=max_retries,
-                retry_base_delay=retry_base_delay,
-                prior_rounds=prior_rounds,
-                on_round_complete=_persist_round,
-                stop_event=stop_event,
-            )
-        except PreemptionRequestedError:
+            async with sample_semaphore:
+                if stop_event.is_set():
+                    raise PreemptionRequestedError("Preemption requested before debate sample")
+                return await run_debate_for_sample(
+                    active_client,
+                    sample,
+                    model=model,
+                    num_agents=num_agents,
+                    num_rounds=num_rounds,
+                    temperature=temperature,
+                    semaphore=semaphore,
+                    rate_limiter=rate_limiter,
+                    max_retries=max_retries,
+                    retry_base_delay=retry_base_delay,
+                    prior_rounds=prior_rounds,
+                    on_round_complete=_persist_round,
+                    stop_event=stop_event,
+                )
+        except PreemptionRequestedError as exc:
+            logger.warning("Stopping debate batch cleanly: %s", exc)
+            stop_event.set()
             return None
 
     tasks = [asyncio.create_task(_run_with_checkpoint(sample)) for sample in samples]
+    total_requested = len(samples)
     for completed_task in asyncio.as_completed(tasks):
         res = await completed_task
         if res is None:
             interrupted = True
         else:
             completed_by_index[res.index] = res
+            logger.info(
+                "[Debate %d/%d] sample=%d consensus=%s gt=%s correct=%s changes=%d",
+                len(completed_by_index),
+                total_requested,
+                res.index,
+                res.consensus_answer,
+                res.ground_truth,
+                res.is_correct,
+                res.answer_changes,
+            )
 
     if stop_event is not None and stop_event.is_set():
         interrupted = True

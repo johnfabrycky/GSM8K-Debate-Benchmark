@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from google.genai import errors
 
 from gsm8k_debate.checkpoint import (
     PreemptionMonitor,
@@ -15,6 +16,7 @@ from gsm8k_debate.checkpoint import (
     load_jsonl_records,
 )
 from gsm8k_debate.debate import AgentRoundLog, load_debate_checkpoint, serialize_agent_round_log
+from gsm8k_debate.llm import is_daily_quota_error, is_retryable_error
 from gsm8k_debate.single_agent import (
     SingleAgentResult,
     load_single_agent_checkpoint,
@@ -119,4 +121,21 @@ def test_load_debate_checkpoint_groups_rounds_by_sample(tmp_path: Path) -> None:
     loaded = load_debate_checkpoint(ckpt)
     assert 3 in loaded
     assert [log.agent_id for log in loaded[3].rounds[1]] == [1, 2]
+
+
+def test_daily_quota_vs_rpm_error_classification() -> None:
+    daily_429 = errors.ClientError(
+        429,
+        {"error": {"message": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}},
+        None,
+    )
+    rpm_429 = errors.ClientError(
+        429,
+        {"error": {"message": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}},
+        None,
+    )
+    assert is_daily_quota_error(daily_429) is True
+    assert is_retryable_error(daily_429) is False
+    assert is_daily_quota_error(rpm_429) is False
+    assert is_retryable_error(rpm_429) is True
 
