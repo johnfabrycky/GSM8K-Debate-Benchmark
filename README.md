@@ -45,9 +45,23 @@ With `.venv` activated:
 python -c "import google.genai; print('Ready')"
 ```
 
-Run the smoke test suite:
+Run the smoke and unit test suite:
 
 ```powershell
 pytest
+```
+
+### 4. Run single-agent GSM8K baseline
+
+Evaluate Gemini Flash on a small subset of the `openai/gsm8k` test split (default: 15 samples):
+
+```powershell
+python scripts/run_single_agent.py --num-samples 15
+```
+
+If you are on the Gemini API Free Tier (e.g., 5 requests/minute), pass `--rpm 4` to pace requests cleanly alongside automatic `429`/`503` retries:
+
+```powershell
+python scripts/run_single_agent.py --num-samples 10 --rpm 4
 ```
 
