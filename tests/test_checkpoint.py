@@ -1,0 +1,122 @@
+"""Unit tests for preemption-safe checkpointing, recovery, and signal monitoring."""
+
+from __future__ import annotations
+
+import json
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from gsm8k_debate.checkpoint import (
+    PreemptionMonitor,
+    append_jsonl_record,
+    atomic_write_text,
+    load_jsonl_records,
+)
+from gsm8k_debate.debate import AgentRoundLog, load_debate_checkpoint, serialize_agent_round_log
+from gsm8k_debate.single_agent import (
+    SingleAgentResult,
+    load_single_agent_checkpoint,
+    serialize_single_agent_result,
+)
+
+
+def test_jsonl_checkpoint_recovers_from_truncated_trailing_line(tmp_path: Path) -> None:
+    ckpt = tmp_path / "checkpoint.jsonl"
+    append_jsonl_record(ckpt, {"index": 0, "ok": True})
+    append_jsonl_record(ckpt, {"index": 1, "ok": True})
+
+    # Simulate abrupt SIGKILL mid-write on the final line.
+    with ckpt.open("a", encoding="utf-8") as handle:
+        handle.write('{"index": 2, "truncated": ')
+
+    records = load_jsonl_records(ckpt)
+    assert records == [{"index": 0, "ok": True}, {"index": 1, "ok": True}]
+
+
+def test_jsonl_checkpoint_rejects_corrupted_middle_line(tmp_path: Path) -> None:
+    ckpt = tmp_path / "bad.jsonl"
+    ckpt.write_text('{"index": 0}\n{corrupt_mid\n{"index": 2}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Corrupted non-trailing JSONL"):
+        load_jsonl_records(ckpt)
+
+
+def test_atomic_write_text_replaces_existing_file(tmp_path: Path) -> None:
+    target = tmp_path / "nested" / "debate_logs.json"
+    atomic_write_text(target, '{"v": 1}')
+    atomic_write_text(target, '{"v": 2}')
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"v": 2}
+    leftovers = [p for p in target.parent.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+
+
+def test_preemption_monitor_request_stop() -> None:
+    with PreemptionMonitor() as monitor:
+        assert monitor.stop_requested is False
+        monitor.request_stop("SIGTERM")
+        assert monitor.stop_requested is True
+
+
+def test_load_single_agent_checkpoint_roundtrip(tmp_path: Path) -> None:
+    ckpt = tmp_path / "single.jsonl"
+    r0 = SingleAgentResult(
+        index=0,
+        question="1+1?",
+        ground_truth=Decimal(2),
+        raw_response=r"\boxed{2}",
+        boxed_raw="2",
+        predicted=Decimal(2),
+        is_correct=True,
+    )
+    append_jsonl_record(ckpt, serialize_single_agent_result(r0))
+
+    loaded = load_single_agent_checkpoint(ckpt)
+    assert loaded == {0: r0}
+
+
+def test_load_debate_checkpoint_groups_rounds_by_sample(tmp_path: Path) -> None:
+    ckpt = tmp_path / "debate.jsonl"
+    log_a1 = AgentRoundLog(
+        round_num=1,
+        agent_id=1,
+        peer_agent_ids=[],
+        prompt_sent="Q",
+        response_text=r"\boxed{10}",
+        boxed_raw="10",
+        predicted=Decimal(10),
+        changed_from_prev_round=False,
+    )
+    log_a2 = AgentRoundLog(
+        round_num=1,
+        agent_id=2,
+        peer_agent_ids=[],
+        prompt_sent="Q",
+        response_text=r"\boxed{12}",
+        boxed_raw="12",
+        predicted=Decimal(12),
+        changed_from_prev_round=False,
+    )
+    append_jsonl_record(
+        ckpt,
+        {
+            "record_type": "round",
+            "sample_index": 3,
+            "question": "Q",
+            "ground_truth": "12",
+            "num_agents": 2,
+            "num_rounds": 3,
+            "round_num": 1,
+            "agent_logs": [
+                serialize_agent_round_log(log_a2),
+                serialize_agent_round_log(log_a1),
+            ],
+        },
+    )
+
+    loaded = load_debate_checkpoint(ckpt)
+    assert 3 in loaded
+    assert [log.agent_id for log in loaded[3].rounds[1]] == [1, 2]
+

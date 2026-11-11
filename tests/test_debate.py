@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from gsm8k_debate.checkpoint import PreemptionMonitor
 from gsm8k_debate.dataset import GSM8KSample
 from gsm8k_debate.debate import (
     DebateAgent,
@@ -212,4 +213,69 @@ def test_evaluate_debate_subset_metrics() -> None:
     assert metrics["round_2_accuracy"] == pytest.approx(1.0)
     assert metrics["round_3_accuracy"] == pytest.approx(1.0)
     assert metrics["total_answer_changes"] == 2
+
+
+def test_evaluate_debate_subset_preemption_and_resume(tmp_path: Path) -> None:
+    samples = [
+        GSM8KSample(
+            index=0,
+            question="What is 3 * 4 + 2?",
+            raw_answer="#### 14",
+            ground_truth=Decimal(14),
+        )
+    ]
+    ckpt = tmp_path / "debate_checkpoint.jsonl"
+    monitor = PreemptionMonitor()
+
+    class _PreemptAfterRound1Models(_FakeAsyncModels):
+        async def generate_content(
+            self,
+            *,
+            model: str,
+            contents: list[object],
+            config: object,
+        ) -> SimpleNamespace:
+            resp = await super().generate_content(model=model, contents=contents, config=config)
+            round_num = (len(contents) + 1) // 2
+            if round_num == 1 and sum(1 for r, _ in self.calls if r == 1) == 3:
+                monitor.request_stop("SIGTERM")
+            return resp
+
+    first_client = SimpleNamespace(aio=SimpleNamespace(models=_PreemptAfterRound1Models()))
+    results1, df1, metrics1 = asyncio.run(
+        evaluate_debate_subset(
+            samples,
+            client=first_client,
+            num_agents=3,
+            num_rounds=3,
+            checkpoint_path=ckpt,
+            resume=False,
+            preemption=monitor,
+        )
+    )
+    assert results1 == []
+    assert df1.empty
+    assert metrics1["interrupted"] is True
+    assert ckpt.exists()
+
+    # Resume with a fresh client: Round 1 should NOT be re-queried (only Rounds 2 and 3 run!).
+    second_models = _FakeAsyncModels()
+    second_client = SimpleNamespace(aio=SimpleNamespace(models=second_models))
+    results2, df2, metrics2 = asyncio.run(
+        evaluate_debate_subset(
+            samples,
+            client=second_client,
+            num_agents=3,
+            num_rounds=3,
+            checkpoint_path=ckpt,
+            resume=True,
+        )
+    )
+    assert len(results2) == 1
+    assert len(df2) == 1
+    assert metrics2["interrupted"] is False
+    assert metrics2["reused_checkpoint_rounds"] == 1
+    assert metrics2["correct"] == 1
+    assert all(round_num > 1 for round_num, _ in second_models.calls)
+    assert len(second_models.calls) == 6  # Only Rounds 2 and 3 (3 agents * 2 rounds)
 

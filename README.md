@@ -87,3 +87,11 @@ Both `run_single_agent.py` and `run_debate.py` flush incremental JSONL checkpoin
 python scripts/run_debate.py --num-samples 5 --rpm 4 --resume
 ```
 
+### 7. Inspect intermediate round logs
+
+Inspect `logs/debate_logs.json` (completed runs) or `logs/debate_checkpoint.jsonl` (in-progress or preempted runs) to see every round's peer inputs (`--show-prompts`), critiques, and answer changes:
+
+```powershell
+python scripts/inspect_logs.py --log-file logs/debate_logs.json --show-prompts
+```
+
