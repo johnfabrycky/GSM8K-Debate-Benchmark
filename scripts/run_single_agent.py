@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
+from gsm8k_debate.checkpoint import PreemptionMonitor, atomic_write_via
 from gsm8k_debate.dataset import load_gsm8k_subset
 from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL, evaluate_gsm8k_subset
 
@@ -56,6 +58,17 @@ def parse_args() -> argparse.Namespace:
         help="Random seed when --shuffle is enabled (default: 42).",
     )
     parser.add_argument(
+        "--checkpoint-file",
+        type=Path,
+        default=Path("logs/single_agent_checkpoint.jsonl"),
+        help="Incremental JSONL checkpoint path (default: logs/single_agent_checkpoint.jsonl).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from --checkpoint-file instead of starting fresh.",
+    )
+    parser.add_argument(
         "--output-csv",
         type=Path,
         default=None,
@@ -73,9 +86,7 @@ def _truncate(val: object, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-async def main_async() -> None:
-    args = parse_args()
-
+async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> int:
     print(f"Loading {args.num_samples} GSM8K test samples from Hugging Face datasets...")
     samples = load_gsm8k_subset(
         num_samples=args.num_samples,
@@ -85,23 +96,30 @@ async def main_async() -> None:
     )
 
     rpm_note = f", rpm={args.rpm}" if args.rpm is not None else ""
-    print(f"Querying {args.model} (max_concurrency={args.max_concurrency}{rpm_note})...")
+    resume_note = f", resume={args.resume}" if args.resume else ""
+    print(
+        f"Querying {args.model} (max_concurrency={args.max_concurrency}{rpm_note}{resume_note})..."
+    )
     df, metrics = await evaluate_gsm8k_subset(
         samples,
         model=args.model,
         max_concurrency=args.max_concurrency,
         requests_per_minute=args.rpm,
         max_retries=args.max_retries,
+        checkpoint_path=args.checkpoint_file,
+        resume=args.resume,
+        preemption=monitor,
     )
 
-    display_df = df[["index", "ground_truth", "boxed_raw", "predicted", "is_correct"]].copy()
-    display_df["error"] = df["error"].map(_truncate)
-    print("\n=== Per-Sample Results ===")
-    print(display_df.to_string(index=False))
+    if not df.empty:
+        display_df = df[["index", "ground_truth", "boxed_raw", "predicted", "is_correct"]].copy()
+        display_df["error"] = df["error"].map(_truncate)
+        print("\n=== Per-Sample Results ===")
+        print(display_df.to_string(index=False))
 
     print("\n=== Accuracy Metrics ===")
     print(f"Model:          {metrics['model']}")
-    print(f"Samples:        {metrics['total']}")
+    print(f"Samples:        {metrics['total']} / {metrics['requested']}")
     print(f"Correct:        {metrics['correct']} / {metrics['total']}")
     print(f"Accuracy:       {metrics['accuracy']:.2%}")
     print(f"Boxed Parsed:   {metrics['boxed_parsed']} / {metrics['total']}")
@@ -112,13 +130,25 @@ async def main_async() -> None:
     print(f"API Errors:     {metrics['errors']}")
 
     if args.output_csv is not None:
-        args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(args.output_csv, index=False)
+        atomic_write_via(args.output_csv, lambda tmp: df.to_csv(tmp, index=False))
         print(f"\nSaved detailed results to {args.output_csv}")
+
+    if metrics["interrupted"]:
+        print(
+            f"\nRun interrupted after {metrics['total']}/{metrics['requested']} samples. "
+            f"Checkpoint saved to {args.checkpoint_file}. "
+            "Re-run with --resume to continue."
+        )
+        return 130
+    return 0
 
 
 def main() -> None:
-    asyncio.run(main_async())
+    args = parse_args()
+    with PreemptionMonitor() as monitor:
+        exit_code = asyncio.run(main_async(args, monitor))
+    if exit_code:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

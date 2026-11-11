@@ -48,3 +48,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Experiment logs and CSV outputs
+logs/
+results/
+

@@ -65,3 +65,25 @@ If you are on the Gemini API Free Tier (e.g., 5 requests/minute), pass `--rpm 4`
 python scripts/run_single_agent.py --num-samples 10 --rpm 4
 ```
 
+### 5. Run multi-agent debate (Du et al.)
+
+Run the 3-agent, 3-round asynchronous debate loop and inspect the intermediate logs (default saves full JSON traces to `logs/debate_logs.json` and prints a preview trace):
+
+```powershell
+python scripts/run_debate.py --num-samples 5 --show-logs 2
+```
+
+For Free Tier quotas (`--rpm 4`), start with 1–3 samples (3 agents × 3 rounds = 9 API calls per sample):
+
+```powershell
+python scripts/run_debate.py --num-samples 2 --rpm 4 --show-logs 2
+```
+
+### 6. Preemption & Resume Support
+
+Both `run_single_agent.py` and `run_debate.py` flush incremental JSONL checkpoints (`logs/single_agent_checkpoint.jsonl` and round-level `logs/debate_checkpoint.jsonl`) and handle `SIGINT`/`SIGTERM` gracefully. If interrupted mid-run, resume from where it left off without repeating completed rounds or samples:
+
+```powershell
+python scripts/run_debate.py --num-samples 5 --rpm 4 --resume
+```
+
