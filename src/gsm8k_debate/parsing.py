@@ -1,9 +1,10 @@
-"""LaTeX extraction, normalization, and SymPy equivalence checking for MATH-500."""
+"""Answer extraction, 3-digit AIME normalization, and symbolic equivalence helpers."""
 
 from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from decimal import Decimal, InvalidOperation
 
 import sympy as sp
@@ -21,7 +22,9 @@ _FRAC_PATTERN = re.compile(
     r"^\s*([+-]?)\s*\\d?frac\s*\{\s*([^{}]+)\s*\}\s*\{\s*([^{}]+)\s*\}\s*$"
 )
 _TEXT_CMD_PATTERN = re.compile(r"\\(?:text|mathrm|mathbf|mathit|mbox)\s*\{([^{}]*)\}")
-_BOXED_CMD_PATTERN = re.compile(r"\\boxed\s*\{")
+_BOXED_CMD_PATTERN = re.compile(r"\\(?:boxed|framebox|fbox)\s*\{")
+_AIME_INT_PATTERN = re.compile(r"^\+?0*(\d+)$")
+_AIME_PREFIX_PATTERN = re.compile(r"^(?:answer|ans)\s*[:=]?\s*", re.IGNORECASE)
 _MIXED_FRAC_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_.^{}\\])([+-]?)(\d+)\s*\\frac\{(\d+)\}\{(\d+)\}"
 )
@@ -94,8 +97,107 @@ def extract_boxed_content(text: str) -> str | None:
     return last_content
 
 
+def format_aime_answer(value: int) -> str:
+    """Format an integer in ``0..999`` as a canonical 3-digit zero-padded AIME string."""
+    if not 0 <= value <= 999:
+        raise ValueError(f"AIME answer must be an integer in 0..999, got {value}")
+    return f"{value:03d}"
+
+
+def parse_aime_answer(raw_value: str | None) -> str | None:
+    """Parse a candidate AIME answer and normalize it to a 3-digit string (``000``-``999``)."""
+    if raw_value is None:
+        return None
+
+    cleaned = _strip_outer_delimiters(str(raw_value))
+    if not cleaned:
+        return None
+
+    cleaned = _strip_text_commands(cleaned)
+    cleaned = cleaned.replace(r"\$", "").replace("$", "")
+    cleaned = cleaned.replace(r"\,", "").replace(r"\!", "").replace(r"\ ", " ")
+    cleaned = _AIME_PREFIX_PATTERN.sub("", cleaned).strip()
+    if "=" in cleaned:
+        cleaned = cleaned.split("=")[-1].strip()
+    cleaned = cleaned.lstrip("#").rstrip(" .!;").strip()
+    if not cleaned:
+        return None
+
+    direct_match = _AIME_INT_PATTERN.match(cleaned)
+    if direct_match:
+        val = int(direct_match.group(1))
+        return f"{val:03d}" if 0 <= val <= 999 else None
+
+    # Accept exact integer-valued expressions (e.g., "042.0" or "\frac{84}{2}") in 0..999,
+    # while rejecting non-integers or out-of-range values.
+    if re.search(r"\b(?:or|and)\b|,", cleaned, re.IGNORECASE):
+        return None
+
+    sympy_expr = _parse_latex_or_expr(cleaned)
+    if sympy_expr is not None and not sympy_expr.free_symbols:
+        try:
+            simplified = sp.simplify(sympy_expr)
+            if isinstance(simplified, sp.Integer):
+                int_val = int(simplified)
+                return f"{int_val:03d}" if 0 <= int_val <= 999 else None
+            if getattr(simplified, "is_real", False) and not getattr(
+                simplified, "is_infinite", False
+            ):
+                approx = Decimal(str(simplified.evalf(30)))
+                if approx == approx.to_integral_value():
+                    int_val = int(approx)
+                    return f"{int_val:03d}" if 0 <= int_val <= 999 else None
+        except _SYMPY_PARSE_ERRORS + (InvalidOperation,):
+            return None
+
+    return None
+
+
+def extract_aime_answer(text: str) -> str | None:
+    """Extract and normalize the final 3-digit AIME integer answer inside ``\\boxed{...}``."""
+    boxed = extract_boxed_content(text)
+    if boxed is None:
+        return None
+    return parse_aime_answer(boxed)
+
+
+def parse_aime_ground_truth_candidates(raw_value: str) -> tuple[str, ...]:
+    """Extract all accepted 3-digit AIME integers from a dataset answer/solution field."""
+    direct = parse_aime_answer(raw_value)
+    if direct is not None:
+        return (direct,)
+
+    boxed = extract_boxed_content(raw_value)
+    if boxed is not None:
+        boxed_aime = parse_aime_answer(boxed)
+        if boxed_aime is not None:
+            return (boxed_aime,)
+
+    # Handle rare official multi-answer strings such as "080 or 081 (both were accepted)".
+    candidates: list[str] = []
+    if re.search(r"\bor\b", raw_value, re.IGNORECASE):
+        head = raw_value.split("(")[0]
+        for token in re.findall(r"\b0*\d{1,3}\b", head):
+            parsed = parse_aime_answer(token)
+            if parsed is not None and parsed not in candidates:
+                candidates.append(parsed)
+    return tuple(candidates)
+
+
+def extract_aime_ground_truth(answer_or_solution: str) -> str:
+    """Extract the canonical 3-digit ``000``-``999`` ground truth from an AIME dataset row."""
+    candidates = parse_aime_ground_truth_candidates(answer_or_solution)
+    if candidates:
+        return candidates[0]
+    raise ValueError(f"Could not extract 000-999 AIME answer from: {answer_or_solution!r}")
+
+
 def extract_ground_truth_answer(answer_or_solution: str) -> str:
-    """Extract the canonical ground-truth answer from a MATH solution or GSM8K answer."""
+    """Extract canonical ground-truth answer (3-digit AIME integer when applicable)."""
+    candidates = parse_aime_ground_truth_candidates(answer_or_solution)
+    if candidates:
+        return candidates[0]
+
     boxed = extract_boxed_content(answer_or_solution)
     if boxed is not None:
         return boxed
@@ -645,15 +747,30 @@ def _match_equations_or_lists(norm_a: str, norm_b: str) -> bool | None:
 
 
 def answers_match(
-    predicted: str | Decimal | None,
-    ground_truth: str | Decimal,
+    predicted: str | Decimal | int | None,
+    ground_truth: str | Decimal | int,
     *,
+    accepted_answers: Sequence[str] = (),
     rel_tol: float = 1e-6,
     abs_tol: float = 1e-6,
 ) -> bool:
-    """Return True if ``predicted`` and ``ground_truth`` are mathematically equivalent."""
+    """Return True if ``predicted`` matches AIME 3-digit answers or symbolic equivalents."""
     if predicted is None:
         return False
+
+    if accepted_answers:
+        pred_aime = parse_aime_answer(str(predicted))
+        if pred_aime is not None:
+            normalized_accepted = {
+                ans
+                for item in accepted_answers
+                if (ans := parse_aime_answer(str(item))) is not None
+            }
+            if pred_aime in normalized_accepted:
+                return True
+
+    if isinstance(predicted, int) and isinstance(ground_truth, int):
+        return predicted == ground_truth
 
     if isinstance(predicted, Decimal) and isinstance(ground_truth, Decimal):
         if predicted == ground_truth:
@@ -665,8 +782,16 @@ def answers_match(
             abs_tol=abs_tol,
         )
 
-    norm_a = normalize_latex_answer(str(predicted))
-    norm_b = normalize_latex_answer(str(ground_truth))
+    pred_str = str(predicted)
+    gt_str = str(ground_truth)
+    pred_aime = parse_aime_answer(pred_str)
+    if pred_aime is not None:
+        gt_candidates = parse_aime_ground_truth_candidates(gt_str)
+        if gt_candidates:
+            return pred_aime in gt_candidates
+
+    norm_a = normalize_latex_answer(pred_str)
+    norm_b = normalize_latex_answer(gt_str)
     if not norm_a or not norm_b:
         return False
     if norm_a == norm_b:

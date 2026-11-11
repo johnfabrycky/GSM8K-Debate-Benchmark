@@ -1,4 +1,4 @@
-"""Unit tests for the multi-agent debate loop, prompt consensus, voting, and logging."""
+"""Unit tests for the multi-agent debate loop, AIME prompts, consensus voting, and logging."""
 
 from __future__ import annotations
 
@@ -24,22 +24,24 @@ from gsm8k_debate.debate import (
 
 
 def test_build_round1_and_consensus_prompts() -> None:
-    q = "Find all real $x$ such that $x^2 - 5x + 6 = 0$."
+    q = "Find the number of valid residues modulo $1000$."
     r1 = build_round1_prompt(q)
     assert q in r1
-    assert "AMC/AIME" in r1
-    assert r"\boxed{answer}" in r1
+    assert "AIME" in r1
+    assert "000 to 999" in r1
+    assert r"\boxed{XXX}" in r1
 
     consensus = build_consensus_prompt(
         q,
         peer_responses=[
-            (2, r"Factoring gives $(x-2)(x-3)=0$. \boxed{2, 3}"),
-            (3, r"By quadratic formula, roots are \boxed{2, 3}"),
+            (2, r"By CRT and Euler totient we get \boxed{042}"),
+            (3, r"Casework yields \boxed{042}"),
         ],
     )
     assert "One agent solution (Agent 2):" in consensus
     assert "One agent solution (Agent 3):" in consensus
     assert "proofs" in consensus.lower()
+    assert r"\boxed{XXX}" in consensus
     assert q in consensus
 
 
@@ -47,7 +49,7 @@ def test_debate_agent_maintains_isolated_history() -> None:
     agent1 = DebateAgent(agent_id=1)
     agent2 = DebateAgent(agent_id=2)
 
-    agent1.record_turn("Round 1 Q", r"Agent 1 R1 \boxed{10}")
+    agent1.record_turn("Round 1 Q", r"Agent 1 R1 \boxed{010}")
     assert len(agent1.history) == 2
     assert len(agent2.history) == 0
 
@@ -59,22 +61,19 @@ def test_debate_agent_maintains_isolated_history() -> None:
     assert next_contents[2].parts[0].text == "Round 2 peer feedback"
 
 
-def test_compute_majority_vote_clusters_symbolic_equivalences() -> None:
-    winner, votes, had_tie = compute_majority_vote([r"\frac{1}{2}", "0.5", r"\frac{3}{4}"])
-    assert winner == "0.5"
-    assert votes == {"0.5": 2, r"\frac{3}{4}": 1}
+def test_compute_majority_vote_canonicalizes_aime_three_digit_integers() -> None:
+    winner, votes, had_tie = compute_majority_vote(["42", "042", "116"])
+    assert winner == "042"
+    assert votes == {"042": 2, "116": 1}
     assert not had_tie
 
-    winner_sym, votes_sym, tie_sym = compute_majority_vote(
-        [r"\frac{1}{\sqrt{2}}", r"\frac{\sqrt{2}}{2}", "1"]
-    )
-    assert winner_sym in {r"\frac{1}{\sqrt{2}}", r"\frac{\sqrt{2}}{2}"}
-    assert sum(votes_sym.values()) == 3
-    assert max(votes_sym.values()) == 2
-    assert not tie_sym
+    winner_pad, votes_pad, tie_pad = compute_majority_vote(["4", "004", "007"])
+    assert winner_pad == "004"
+    assert votes_pad == {"004": 2, "007": 1}
+    assert not tie_pad
 
-    winner_tie, _, is_tie = compute_majority_vote(["1", "2", "3"])
-    assert winner_tie == "1"
+    winner_tie, _, is_tie = compute_majority_vote(["001", "002", "003"])
+    assert winner_tie == "001"
     assert is_tie
 
     none_winner, empty_votes, no_tie = compute_majority_vote([None, None])
@@ -104,10 +103,10 @@ class _FakeAsyncModels:
         if round_num == 1:
             call_idx = sum(1 for r, _ in self.calls if r == 1)
             if call_idx == 1:
-                return SimpleNamespace(text=r"AGENT1_R1: I got 3*4=11. \boxed{11}")
+                return SimpleNamespace(text=r"AGENT1_R1: I got 3*4=11. \boxed{011}")
             if call_idx == 2:
-                return SimpleNamespace(text=r"AGENT2_R1: \frac{28}{2} = 14. \boxed{\frac{28}{2}}")
-            return SimpleNamespace(text=r"AGENT3_R1: 3*4=13? Wait \boxed{13}")
+                return SimpleNamespace(text=r"AGENT2_R1: 3*4+2 = 14. \boxed{14}")
+            return SimpleNamespace(text=r"AGENT3_R1: 3*4=13? Wait \boxed{013}")
 
         own_r1 = contents[1].parts[0].text
         if "AGENT1_R1" in own_r1:
@@ -116,10 +115,10 @@ class _FakeAsyncModels:
             assert "AGENT1_R1" not in latest_prompt
             if round_num == 2:
                 return SimpleNamespace(
-                    text=r"AGENT1_R2: Reading Agent 2 (14), 3*4=12 not 11, so 12+2=14. \boxed{14}"
+                    text=r"AGENT1_R2: Reading Agent 2 (14), 3*4=12 not 11, so 12+2=14. \boxed{014}"
                 )
             return SimpleNamespace(
-                text=r"AGENT1_R3: Confirming 14 after reviewing Agent 2 and 3. \boxed{14}"
+                text=r"AGENT1_R3: Confirming 014 after reviewing Agent 2 and 3. \boxed{014}"
             )
 
         if "AGENT2_R1" in own_r1:
@@ -128,24 +127,26 @@ class _FakeAsyncModels:
             assert "AGENT2_R1" not in latest_prompt
             if round_num == 2:
                 return SimpleNamespace(
-                    text=r"AGENT2_R2: Simplified \frac{28}{2}; keeping \boxed{14}"
+                    text=r"AGENT2_R2: Zero-padding to 3 digits; keeping \boxed{014}"
                 )
-            return SimpleNamespace(text=r"AGENT2_R3: All peers agree on \boxed{14}")
+            return SimpleNamespace(text=r"AGENT2_R3: All peers agree on \boxed{014}")
 
         assert "AGENT1_R1" in latest_prompt
         assert "AGENT2_R1" in latest_prompt
         assert "AGENT3_R1" not in latest_prompt
-        return SimpleNamespace(text=r"AGENT3_R2_OR_R3: Updating to match Agent 2: \boxed{14}")
+        return SimpleNamespace(text=r"AGENT3_R2_OR_R3: Updating to match Agent 2: \boxed{014}")
 
 
 def test_run_debate_for_sample_rounds_and_logging(tmp_path: Path) -> None:
     sample = MathSample(
         index=0,
         question="Compute $3 \\cdot 4 + 2$.",
-        raw_answer=r"\boxed{14}",
-        ground_truth="14",
-        subject="Prealgebra",
-        level=1,
+        raw_answer=r"\boxed{014}",
+        ground_truth="014",
+        year=2024,
+        part="II",
+        problem_number=15,
+        unique_id="2024-II-15",
     )
     fake_client = SimpleNamespace(aio=SimpleNamespace(models=_FakeAsyncModels()))
 
@@ -159,12 +160,12 @@ def test_run_debate_for_sample_rounds_and_logging(tmp_path: Path) -> None:
     )
 
     assert len(result.round_logs) == 9
-    assert result.round_majority_answers[1] == "11"
-    assert result.round_majority_answers[2] == "14"
-    assert result.round_majority_answers[3] == "14"
-    assert result.consensus_answer == "14"
+    assert result.round_majority_answers[1] == "011"
+    assert result.round_majority_answers[2] == "014"
+    assert result.round_majority_answers[3] == "014"
+    assert result.consensus_answer == "014"
     assert result.is_correct is True
-    # Agent 1 (11->14) and Agent 3 (13->14) changed; Agent 2 (\frac{28}{2}->14) stayed equivalent!
+    # Agent 1 (011->014) and Agent 3 (013->014) changed; Agent 2 (14->014) stayed equivalent.
     assert result.answer_changes == 2
 
     r2_agent1 = next(
@@ -183,10 +184,13 @@ def test_run_debate_for_sample_rounds_and_logging(tmp_path: Path) -> None:
     log_path = save_debate_logs([result], tmp_path / "debate_logs.json")
     loaded = json.loads(log_path.read_text(encoding="utf-8"))
     assert len(loaded) == 1
-    assert loaded[0]["subject"] == "Prealgebra"
+    assert loaded[0]["unique_id"] == "2024-II-15"
+    assert loaded[0]["year"] == 2024
+    assert loaded[0]["problem_number"] == 15
     assert len(loaded[0]["round_logs"]) == 9
 
     trace = format_debate_trace(result)
+    assert "ID: 2024-II-15" in trace
     assert "Round 1" in trace
     assert "Round 2" in trace
     assert "Round 3" in trace
@@ -198,8 +202,8 @@ def test_evaluate_debate_subset_metrics() -> None:
         MathSample(
             index=0,
             question="Compute $3 \\cdot 4 + 2$.",
-            raw_answer=r"\boxed{14}",
-            ground_truth="14",
+            raw_answer=r"\boxed{014}",
+            ground_truth="014",
         )
     ]
     fake_client = SimpleNamespace(aio=SimpleNamespace(models=_FakeAsyncModels()))
@@ -229,8 +233,8 @@ def test_evaluate_debate_subset_preemption_and_resume(tmp_path: Path) -> None:
         MathSample(
             index=0,
             question="Compute $3 \\cdot 4 + 2$.",
-            raw_answer=r"\boxed{14}",
-            ground_truth="14",
+            raw_answer=r"\boxed{014}",
+            ground_truth="014",
         )
     ]
     ckpt = tmp_path / "debate_checkpoint.jsonl"

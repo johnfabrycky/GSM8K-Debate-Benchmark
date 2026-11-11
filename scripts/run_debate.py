@@ -1,4 +1,4 @@
-"""Run multi-agent Gemini Flash debate on a subset of HuggingFaceH4/MATH-500."""
+"""Run multi-agent Gemini Flash debate on a subset of Hugging Face AIME."""
 
 from __future__ import annotations
 
@@ -9,7 +9,11 @@ import sys
 from pathlib import Path
 
 from gsm8k_debate.checkpoint import PreemptionMonitor, atomic_write_via
-from gsm8k_debate.dataset import load_math500_subset
+from gsm8k_debate.dataset import (
+    DEFAULT_AIME_DATASET,
+    DEFAULT_AIME_SPLIT,
+    load_aime_subset,
+)
 from gsm8k_debate.debate import (
     DEFAULT_DEBATE_TEMPERATURE,
     DEFAULT_NUM_AGENTS,
@@ -23,25 +27,46 @@ from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run multi-agent debate (Du et al.) on a MATH-500 test subset."
+        description="Run multi-agent debate (Du et al.) on a Hugging Face AIME subset."
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=DEFAULT_AIME_DATASET,
+        help=(
+            f"Hugging Face AIME dataset ID (default: {DEFAULT_AIME_DATASET}; "
+            "also supports di-zhang-fdu/AIME_1983_2024 or HuggingFaceH4/aime_2024)."
+        ),
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default=DEFAULT_AIME_SPLIT,
+        help=f"Dataset split name (default: {DEFAULT_AIME_SPLIT}).",
     )
     parser.add_argument(
         "--num-samples",
         type=int,
         default=5,
-        help="Number of MATH-500 test samples to evaluate (default: 5).",
+        help="Number of AIME samples to evaluate (default: 5).",
     )
     parser.add_argument(
-        "--subject",
-        type=str,
-        default=None,
-        help="Optional MATH-500 subject filter (e.g., Algebra, Number Theory, Precalculus).",
-    )
-    parser.add_argument(
-        "--level",
+        "--year",
         type=int,
         default=None,
-        help="Optional MATH-500 difficulty level filter (1-5).",
+        help="Optional AIME competition year filter (e.g., 2024).",
+    )
+    parser.add_argument(
+        "--min-problem",
+        type=int,
+        default=None,
+        help="Optional minimum AIME problem number filter (1-15).",
+    )
+    parser.add_argument(
+        "--max-problem",
+        type=int,
+        default=None,
+        help="Optional maximum AIME problem number filter (1-15).",
     )
     parser.add_argument(
         "--num-agents",
@@ -91,7 +116,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--shuffle",
         action="store_true",
-        help="Shuffle the test split before slicing num-samples.",
+        help="Shuffle the filtered split before slicing num-samples.",
     )
     parser.add_argument(
         "--seed",
@@ -102,10 +127,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-file",
         type=Path,
-        default=Path("logs/math500/debate_checkpoint.jsonl"),
+        default=Path("logs/aime/debate_checkpoint.jsonl"),
         help=(
             "Incremental round-level JSONL checkpoint path "
-            "(default: logs/math500/debate_checkpoint.jsonl)."
+            "(default: logs/aime/debate_checkpoint.jsonl)."
         ),
     )
     parser.add_argument(
@@ -116,10 +141,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-file",
         type=Path,
-        default=Path("logs/math500/debate_logs.json"),
+        default=Path("logs/aime/debate_logs.json"),
         help=(
             "Path to save intermediate round-by-round JSON logs "
-            "(default: logs/math500/debate_logs.json)."
+            "(default: logs/aime/debate_logs.json)."
         ),
     )
     parser.add_argument(
@@ -143,14 +168,16 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
-    print(f"Loading {args.num_samples} samples from HuggingFaceH4/MATH-500 (test)...")
-    samples = load_math500_subset(
+    print(f"Loading up to {args.num_samples} samples from {args.dataset} ({args.split})...")
+    samples = load_aime_subset(
         num_samples=args.num_samples,
-        split="test",
+        dataset_name=args.dataset,
+        split=args.split,
         shuffle=args.shuffle,
         seed=args.seed,
-        subject=args.subject,
-        level=args.level,
+        year=args.year,
+        min_problem=args.min_problem,
+        max_problem=args.max_problem,
     )
 
     total_calls = len(samples) * args.num_agents * args.num_rounds
@@ -158,7 +185,7 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     resume_note = f", resume={args.resume}" if args.resume else ""
     print(
         f"Running {args.num_agents}-agent, {args.num_rounds}-round debate on {len(samples)} "
-        f"MATH-500 samples (~{total_calls} max API calls, model={args.model}, "
+        f"AIME samples (~{total_calls} max API calls, model={args.model}, "
         f"max_concurrency={args.max_concurrency}{rpm_note}{resume_note})..."
     )
 
@@ -190,7 +217,7 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
         print(df.to_string(index=False))
 
     print("\n=== Debate Metrics ===")
-    print("Dataset:                  HuggingFaceH4/MATH-500")
+    print(f"Dataset:                  {args.dataset}")
     print(f"Model:                    {metrics['model']}")
     print(f"Agents x Rounds:          {metrics['num_agents']} x {metrics['num_rounds']}")
     print(f"Samples:                  {metrics['total']} / {metrics['requested']}")

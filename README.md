@@ -1,6 +1,6 @@
-# math-debate (HuggingFaceH4/MATH-500)
+# math-debate (AIME Olympiad Benchmark)
 
-Async multi-agent debate benchmark on `HuggingFaceH4/MATH-500` using Python 3.10+, `sympy` symbolic equivalence verification, and the `google-genai` SDK.
+Async multi-agent debate benchmark on Hugging Face AIME datasets (default: `AI-MO/aimo-validation-aime`; also supports `di-zhang-fdu/AIME_1983_2024` and `HuggingFaceH4/aime_2024`) using Python 3.10+, 3-digit integer answer normalization (`000`–`999`), and the `google-genai` SDK.
 
 ## Setup
 
@@ -45,29 +45,29 @@ With `.venv` activated:
 python -c "import google.genai, sympy; print('Ready')"
 ```
 
-Run the smoke and unit test suite:
+Run the test suite:
 
 ```powershell
 pytest
 ```
 
-### 4. Run single-agent MATH-500 baseline
+### 4. Run single-agent AIME baseline
 
-Evaluate Gemini Flash on a subset of `HuggingFaceH4/MATH-500` (default: 15 samples):
+Evaluate Gemini Flash on an AIME subset (default: 15 problems from `AI-MO/aimo-validation-aime`):
 
 ```powershell
 python scripts/run_single_agent.py --num-samples 15
 ```
 
-You can also filter by competition subject or difficulty level (`1`–`5`):
+You can also filter by competition year or problem number tier (`1`–`15`), or switch datasets (e.g., `di-zhang-fdu/AIME_1983_2024`):
 
 ```powershell
-python scripts/run_single_agent.py --num-samples 20 --subject "Number Theory" --level 5
+python scripts/run_single_agent.py --year 2024 --min-problem 10 --num-samples 15
 ```
 
 ### 5. Run multi-agent debate (Du et al.)
 
-Run the 3-agent async debate loop (Round 1 independent competition proof + Rounds 2 & 3 peer-debate rounds) and inspect the intermediate logs (`logs/math500/debate_logs.json`):
+Run the 3-agent async debate loop (Round 1 independent Olympiad proof + Rounds 2 & 3 peer-debate rounds) and inspect the intermediate logs (`logs/aime/debate_logs.json`):
 
 ```powershell
 python scripts/run_debate.py --num-samples 5 --show-logs 2
@@ -81,7 +81,7 @@ python scripts/run_debate.py --num-samples 2 --rpm 4 --show-logs 2
 
 ### 6. Preemption & Resume Support
 
-Both `run_single_agent.py` and `run_debate.py` flush incremental JSONL checkpoints (`logs/math500/single_agent_checkpoint.jsonl` and round-level `logs/math500/debate_checkpoint.jsonl`) and handle `SIGINT`/`SIGTERM` gracefully. If interrupted mid-run, resume from where it left off without repeating completed rounds or samples:
+Both `run_single_agent.py` and `run_debate.py` flush incremental JSONL checkpoints (`logs/aime/single_agent_checkpoint.jsonl` and round-level `logs/aime/debate_checkpoint.jsonl`) and handle `SIGINT`/`SIGTERM` gracefully. If interrupted mid-run, resume without repeating completed rounds or samples:
 
 ```powershell
 python scripts/run_debate.py --num-samples 5 --resume
@@ -89,22 +89,28 @@ python scripts/run_debate.py --num-samples 5 --resume
 
 ### 7. Inspect intermediate round logs
 
-Inspect `logs/math500/debate_logs.json` (completed runs) or `logs/math500/debate_checkpoint.jsonl` (in-progress or preempted runs) to see every round's peer inputs (`--show-prompts`), proof critiques, and answer changes:
+Inspect `logs/aime/debate_logs.json` (completed runs) or `logs/aime/debate_checkpoint.jsonl` (in-progress or preempted runs) to see every round's peer inputs (`--show-prompts`), proof critiques, and answer changes:
 
 ```powershell
-python scripts/inspect_logs.py --log-file logs/math500/debate_logs.json --show-prompts
+python scripts/inspect_logs.py --log-file logs/aime/debate_logs.json --show-prompts
 ```
 
 ### 8. Side-by-side Single-Agent vs. Debate benchmark
 
-Compare Single-Agent baseline against 3-Agent Multi-Round Debate on 100 `HuggingFaceH4/MATH-500` test instances (`--resume` reuses checkpoints in `logs/math500`), logging accuracy, LaTeX/SymPy answer changes, error types (`arithmetic_slip` vs. `conceptual_logic_error`), subject/level breakdowns, and execution time to `results/math500/`:
+Compare Single-Agent baseline against 3-Agent Multi-Round Debate on all 90 validation problems of `AI-MO/aimo-validation-aime` (`--resume` reuses checkpoints in `logs/aime`), logging 3-digit `000`–`999` accuracy, answer changes, error types (`arithmetic_slip` vs. `conceptual_logic_error`), year/difficulty-tier breakdowns (`Problems 01-05`, `06-10`, `11-15`), and execution time to `results/aime/`:
 
 ```powershell
-python scripts/run_benchmark.py --num-samples 100 --max-concurrency 15 --resume
+python scripts/run_benchmark.py --num-samples 90 --max-concurrency 15 --resume
+```
+
+To run 100+ historical AIME problems (`1983`–`2024`):
+
+```powershell
+python scripts/run_benchmark.py --dataset di-zhang-fdu/AIME_1983_2024 --num-samples 100 --shuffle --max-concurrency 15 --resume
 ```
 
 For Free Tier quotas (e.g., 5 RPM), pass `--rpm 4` so requests are spaced smoothly without `429` bursts:
 
 ```powershell
-python scripts/run_benchmark.py --num-samples 100 --rpm 4 --resume
+python scripts/run_benchmark.py --num-samples 90 --rpm 4 --resume
 ```

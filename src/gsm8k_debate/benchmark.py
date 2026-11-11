@@ -1,4 +1,4 @@
-"""Side-by-side Single-Agent vs. Multi-Agent Debate benchmark comparison."""
+"""Side-by-side Single-Agent vs. Multi-Agent Debate benchmark comparison on AIME."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pandas as pd
 from google import genai
 
 from gsm8k_debate.checkpoint import PreemptionMonitor, atomic_write_text, atomic_write_via
-from gsm8k_debate.dataset import MathSample
+from gsm8k_debate.dataset import DEFAULT_AIME_DATASET, MathSample
 from gsm8k_debate.debate import (
     DEFAULT_DEBATE_TEMPERATURE,
     DEFAULT_NUM_AGENTS,
@@ -27,7 +27,7 @@ from gsm8k_debate.error_analysis import (
     classify_response_error,
 )
 from gsm8k_debate.parsing import answers_match
-from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL, evaluate_math_subset
+from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL, evaluate_aime_subset
 
 
 def classify_outcome(single_correct: bool, debate_correct: bool) -> str:
@@ -88,8 +88,10 @@ def build_comparison_dataframe(
     round_cols = [f"round_{r}_majority" for r in range(1, num_rounds + 1)]
     expected_cols = [
         "index",
-        "subject",
-        "level",
+        "unique_id",
+        "year",
+        "part",
+        "problem_number",
         "ground_truth",
         "single_boxed",
         "single_predicted",
@@ -109,7 +111,7 @@ def build_comparison_dataframe(
         return pd.DataFrame(columns=expected_cols)
 
     single_cols = ["index", "ground_truth", "boxed_raw", "predicted", "is_correct"]
-    for meta_col in ("subject", "level"):
+    for meta_col in ("unique_id", "year", "part", "problem_number"):
         if meta_col in single_df.columns:
             single_cols.append(meta_col)
     if "raw_response" in single_df.columns:
@@ -145,16 +147,14 @@ def build_comparison_dataframe(
 
     debate_by_index = {res.index: res for res in debate_results} if debate_results else {}
 
-    if "subject" not in merged.columns:
-        merged["subject"] = [
-            debate_by_index[int(idx)].subject if int(idx) in debate_by_index else None
-            for idx in merged["index"]
-        ]
-    if "level" not in merged.columns:
-        merged["level"] = [
-            debate_by_index[int(idx)].level if int(idx) in debate_by_index else None
-            for idx in merged["index"]
-        ]
+    for meta_col in ("unique_id", "year", "part", "problem_number"):
+        if meta_col not in merged.columns:
+            merged[meta_col] = [
+                getattr(debate_by_index[int(idx)], meta_col)
+                if int(idx) in debate_by_index
+                else None
+                for idx in merged["index"]
+            ]
 
     single_error_types: list[str] = []
     single_error_details: list[str | None] = []
@@ -202,21 +202,34 @@ def build_comparison_dataframe(
     return merged[expected_cols]
 
 
+def _difficulty_tier(problem_number: object) -> str | None:
+    if problem_number is None or pd.isna(problem_number):
+        return None
+    num = int(problem_number)
+    if num <= 5:
+        return "Problems 01-05"
+    if num <= 10:
+        return "Problems 06-10"
+    return "Problems 11-15"
+
+
 def _build_group_breakdown(
     comparison_df: pd.DataFrame,
-    column: str,
+    group_series: pd.Series,
+    *,
+    as_int_label: bool = False,
 ) -> dict[str, dict[str, float | int]]:
-    if comparison_df.empty or column not in comparison_df.columns:
-        return {}
-    valid = comparison_df[comparison_df[column].notna()]
-    if valid.empty:
+    valid_mask = group_series.notna()
+    if not valid_mask.any():
         return {}
 
     breakdown: dict[str, dict[str, float | int]] = {}
-    for key, group in valid.groupby(column, sort=True):
+    valid_df = comparison_df.loc[valid_mask].copy()
+    valid_df["_group_key"] = group_series.loc[valid_mask]
+    for key, group in valid_df.groupby("_group_key", sort=True):
         s_acc = float(group["single_correct"].mean())
         d_acc = float(group["debate_correct"].mean())
-        label = str(int(key)) if column == "level" and isinstance(key, (int, float)) else str(key)
+        label = str(int(key)) if as_int_label and isinstance(key, (int, float)) else str(key)
         breakdown[label] = {
             "count": len(group),
             "single_accuracy": round(s_acc, 4),
@@ -231,13 +244,14 @@ def summarize_benchmark(
     single_metrics: dict[str, Any],
     debate_metrics: dict[str, Any],
     *,
+    dataset_name: str = DEFAULT_AIME_DATASET,
     num_agents: int = DEFAULT_NUM_AGENTS,
     num_rounds: int = DEFAULT_NUM_ROUNDS,
     single_duration_seconds: float = 0.0,
     debate_duration_seconds: float = 0.0,
     total_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Compute aggregate Single-Agent vs. Debate metrics, error types, and timings."""
+    """Compute aggregate Single-Agent vs. Debate metrics, error types, and AIME breakdowns."""
     compared_count = len(comparison_df)
     outcome_counts = (
         comparison_df["outcome"].value_counts().to_dict() if compared_count else {}
@@ -278,7 +292,7 @@ def summarize_benchmark(
     )
 
     summary: dict[str, Any] = {
-        "dataset": "HuggingFaceH4/MATH-500",
+        "dataset": dataset_name,
         "model": debate_metrics.get("model", single_metrics.get("model", DEFAULT_FLASH_MODEL)),
         "num_agents": num_agents,
         "num_rounds": num_rounds,
@@ -310,12 +324,18 @@ def summarize_benchmark(
         key = f"round_{round_num}_accuracy"
         summary[key] = float(debate_metrics.get(key, 0.0))
 
-    subject_breakdown = _build_group_breakdown(comparison_df, "subject")
-    if subject_breakdown:
-        summary["subject_breakdown"] = subject_breakdown
-    level_breakdown = _build_group_breakdown(comparison_df, "level")
-    if level_breakdown:
-        summary["level_breakdown"] = level_breakdown
+    if not comparison_df.empty and "year" in comparison_df.columns:
+        year_breakdown = _build_group_breakdown(
+            comparison_df, comparison_df["year"], as_int_label=True
+        )
+        if year_breakdown:
+            summary["year_breakdown"] = year_breakdown
+
+    if not comparison_df.empty and "problem_number" in comparison_df.columns:
+        tier_series = comparison_df["problem_number"].map(_difficulty_tier)
+        tier_breakdown = _build_group_breakdown(comparison_df, tier_series)
+        if tier_breakdown:
+            summary["difficulty_tier_breakdown"] = tier_breakdown
 
     return summary
 
@@ -324,6 +344,7 @@ async def run_benchmark_comparison(
     samples: Sequence[MathSample],
     *,
     client: genai.Client | None = None,
+    dataset_name: str = DEFAULT_AIME_DATASET,
     model: str = DEFAULT_FLASH_MODEL,
     num_agents: int = DEFAULT_NUM_AGENTS,
     num_rounds: int = DEFAULT_NUM_ROUNDS,
@@ -348,7 +369,7 @@ async def run_benchmark_comparison(
     overall_start = time.perf_counter()
 
     single_start = time.perf_counter()
-    single_df, single_metrics = await evaluate_math_subset(
+    single_df, single_metrics = await evaluate_aime_subset(
         samples,
         client=client,
         model=model,
@@ -375,6 +396,7 @@ async def run_benchmark_comparison(
                 "accuracy": 0.0,
                 "interrupted": True,
             },
+            dataset_name=dataset_name,
             num_agents=num_agents,
             num_rounds=num_rounds,
             single_duration_seconds=single_duration,
@@ -412,6 +434,7 @@ async def run_benchmark_comparison(
         comparison_df,
         single_metrics,
         debate_metrics,
+        dataset_name=dataset_name,
         num_agents=num_agents,
         num_rounds=num_rounds,
         single_duration_seconds=single_duration,

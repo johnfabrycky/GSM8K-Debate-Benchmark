@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gsm8k-debate"
 version = "0.1.0"
-description = "Async multi-agent debate benchmark on MATH-500 using the Google GenAI SDK."
+description = "Async multi-agent debate benchmark on AIME Olympiad datasets using the Google GenAI SDK."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

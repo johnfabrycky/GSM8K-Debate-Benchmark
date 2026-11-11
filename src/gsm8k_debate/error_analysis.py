@@ -131,7 +131,7 @@ def classify_response_error(
     if predicted is None:
         return ErrorClassification(
             error_type=ERROR_FORMAT_PARSE,
-            detail="Missing or empty \\boxed{answer}",
+            detail="Missing or invalid \\boxed{XXX} 3-digit AIME integer (000-999)",
         )
 
     slips = find_arithmetic_slips(response_text)

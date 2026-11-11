@@ -1,4 +1,4 @@
-"""Unit tests for heuristic math error classification."""
+"""Unit tests for heuristic Olympiad math error classification."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ def test_find_arithmetic_slips_ignores_latex_structure_and_valid_math() -> None:
         "2^10 + 1 = 1025.\n"
         "a_1 + 2 = 3.\n"
         "4! + 1 = 25.\n"
+        r"1234 \equiv 234 \pmod{1000}." "\n"
         r"\frac{1}{2} + \frac{1}{2} = 1."
     )
     assert find_arithmetic_slips(good_text) == []
@@ -40,8 +41,8 @@ def test_classify_response_error_categories() -> None:
     assert (
         classify_response_error(
             is_correct=True,
-            response_text=r"\boxed{\frac{14}{3}}",
-            predicted=r"\frac{14}{3}",
+            response_text=r"\boxed{033}",
+            predicted="033",
         ).error_type
         == ERROR_NONE
     )
@@ -54,27 +55,27 @@ def test_classify_response_error_categories() -> None:
         ).error_type
         == ERROR_API
     )
-    assert (
-        classify_response_error(
-            is_correct=False,
-            response_text="The answer is 18 without a box.",
-            predicted=None,
-        ).error_type
-        == ERROR_FORMAT_PARSE
+    format_cls = classify_response_error(
+        is_correct=False,
+        response_text="The answer is 042 without a box.",
+        predicted=None,
     )
+    assert format_cls.error_type == ERROR_FORMAT_PARSE
+    assert format_cls.detail is not None and "000-999" in format_cls.detail
+
     assert (
         classify_response_error(
             is_correct=False,
-            response_text=r"3 \times 4 = 11, plus 2 = 13. \boxed{13}",
-            predicted="13",
+            response_text=r"3 \times 4 = 11, plus 2 = 13. \boxed{013}",
+            predicted="013",
         ).error_type
         == ERROR_ARITHMETIC_SLIP
     )
     assert (
         classify_response_error(
             is_correct=False,
-            response_text=r"By wrong theorem assumption, 2^3 + 1 = 9. \boxed{9}",
-            predicted="9",
+            response_text=r"By wrong theorem assumption, 2^3 + 1 = 9. \boxed{009}",
+            predicted="009",
         ).error_type
         == ERROR_CONCEPTUAL_LOGIC
     )
