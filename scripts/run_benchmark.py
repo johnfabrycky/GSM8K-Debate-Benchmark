@@ -1,4 +1,4 @@
-"""Run side-by-side Single-Agent vs. Multi-Agent Debate benchmark on AIME."""
+"""Run side-by-side Single-Agent vs. Multi-Agent Debate benchmark on GSM8K (Ollama / OpenAI)."""
 
 from __future__ import annotations
 
@@ -10,68 +10,49 @@ from pathlib import Path
 
 from gsm8k_debate.benchmark import run_benchmark_comparison, save_benchmark_outputs
 from gsm8k_debate.checkpoint import PreemptionMonitor
+from gsm8k_debate.config import (
+    DEFAULT_MODEL,
+    DEFAULT_OLLAMA_API_KEY,
+    DEFAULT_OLLAMA_BASE_URL,
+    get_openai_api_key,
+    get_openai_base_url,
+)
 from gsm8k_debate.dataset import (
-    DEFAULT_AIME_DATASET,
-    DEFAULT_AIME_SPLIT,
-    DEFAULT_MAX_PROBLEM,
-    DEFAULT_MIN_PROBLEM,
-    load_aime_subset,
+    DEFAULT_GSM8K_CONFIG,
+    DEFAULT_GSM8K_DATASET,
+    DEFAULT_GSM8K_SPLIT,
+    load_gsm8k_subset,
 )
 from gsm8k_debate.debate import DEFAULT_DEBATE_TEMPERATURE, DEFAULT_NUM_AGENTS, DEFAULT_NUM_ROUNDS
-from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare Single-Agent vs. Multi-Agent Debate on Hugging Face AIME datasets."
+        description="Compare Single-Agent vs. Multi-Agent Debate on a GSM8K test subset."
     )
     parser.add_argument(
         "--dataset",
         type=str,
-        default=DEFAULT_AIME_DATASET,
-        help=(
-            f"Hugging Face AIME dataset ID (default: {DEFAULT_AIME_DATASET}; "
-            "also supports di-zhang-fdu/AIME_1983_2024 or HuggingFaceH4/aime_2024)."
-        ),
+        default=DEFAULT_GSM8K_DATASET,
+        help=f"Hugging Face GSM8K dataset ID (default: {DEFAULT_GSM8K_DATASET}).",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=DEFAULT_GSM8K_CONFIG,
+        help=f"Dataset configuration name (default: {DEFAULT_GSM8K_CONFIG}).",
     )
     parser.add_argument(
         "--split",
         type=str,
-        default=DEFAULT_AIME_SPLIT,
-        help=f"Dataset split name (default: {DEFAULT_AIME_SPLIT}).",
+        default=DEFAULT_GSM8K_SPLIT,
+        help=f"Dataset split name (default: {DEFAULT_GSM8K_SPLIT}).",
     )
     parser.add_argument(
         "--num-samples",
         type=int,
-        default=30,
-        help=(
-            "Number of hard AIME problems (11-15) to benchmark (default: 30, covering "
-            "all problems 11-15 across 2022-2024 in AI-MO/aimo-validation-aime)."
-        ),
-    )
-    parser.add_argument(
-        "--year",
-        type=int,
-        default=None,
-        help="Optional AIME competition year filter (e.g., 2024).",
-    )
-    parser.add_argument(
-        "--min-problem",
-        type=int,
-        default=DEFAULT_MIN_PROBLEM,
-        help=(
-            f"Minimum AIME problem number filter (1-15, default: {DEFAULT_MIN_PROBLEM} "
-            "for the hardest problems 11-15 per year)."
-        ),
-    )
-    parser.add_argument(
-        "--max-problem",
-        type=int,
-        default=DEFAULT_MAX_PROBLEM,
-        help=(
-            f"Maximum AIME problem number filter (1-15, default: {DEFAULT_MAX_PROBLEM} "
-            "for the hardest problems 11-15 per year)."
-        ),
+        default=100,
+        help="Number of GSM8K test samples to benchmark (default: 100).",
     )
     parser.add_argument(
         "--num-agents",
@@ -91,8 +72,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default=DEFAULT_FLASH_MODEL,
-        help=f"Gemini Flash model name (default: {DEFAULT_FLASH_MODEL}).",
+        default=DEFAULT_MODEL,
+        help=f"Model name at --base-url (default: {DEFAULT_MODEL}).",
+    )
+    parser.add_argument(
+        "--base-url",
+        type=str,
+        default=None,
+        help=(
+            f"OpenAI-compatible base URL (default: {DEFAULT_OLLAMA_BASE_URL}; "
+            "overridable via OLLAMA_BASE_URL or OPENAI_BASE_URL)."
+        ),
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help=(
+            f"OpenAI-compatible API key string (default: {DEFAULT_OLLAMA_API_KEY!r}; "
+            "overridable via OLLAMA_API_KEY or OPENAI_API_KEY)."
+        ),
     )
     parser.add_argument(
         "--single-temperature",
@@ -109,8 +108,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-concurrency",
         type=int,
-        default=5,
-        help="Maximum concurrent Gemini API requests (default: 5).",
+        default=3,
+        help="Maximum concurrent API requests (default: 3).",
     )
     parser.add_argument(
         "--rpm",
@@ -127,7 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--shuffle",
         action="store_true",
-        help="Shuffle the filtered split before slicing num-samples.",
+        help="Shuffle the split before slicing num-samples.",
     )
     parser.add_argument(
         "--seed",
@@ -138,19 +137,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
-        default=Path("logs/aime"),
+        default=Path("logs"),
         help=(
             "Directory holding single_agent_checkpoint.jsonl and debate_checkpoint.jsonl "
-            "(default: logs/aime)."
+            "(default: logs)."
         ),
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("results/aime"),
+        default=Path("results/benchmark"),
         help=(
             "Directory to write comparison.csv, summary.json, and debate_logs.json "
-            "(default: results/aime)."
+            "(default: results/benchmark)."
         ),
     )
     parser.add_argument(
@@ -175,18 +174,23 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     )
 
     print(
-        f"Loading up to {args.num_samples} samples (problems {args.min_problem}-{args.max_problem}) "
-        f"from {args.dataset} ({args.split})..."
+        f"Loading {args.num_samples} GSM8K samples from {args.dataset} "
+        f"({args.config}, {args.split})..."
     )
-    samples = load_aime_subset(
+    samples = load_gsm8k_subset(
         num_samples=args.num_samples,
         dataset_name=args.dataset,
+        config_name=args.config,
         split=args.split,
         shuffle=args.shuffle,
         seed=args.seed,
-        year=args.year,
-        min_problem=args.min_problem,
-        max_problem=args.max_problem,
+    )
+
+    base_url = get_openai_base_url(base_url=args.base_url)
+    api_key = get_openai_api_key(api_key=args.api_key)
+    print(
+        f"Using endpoint base_url={base_url}, model={args.model} "
+        f"(max_concurrency={args.max_concurrency})."
     )
 
     single_ckpt = args.checkpoint_dir / "single_agent_checkpoint.jsonl"
@@ -196,6 +200,8 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
         samples,
         dataset_name=args.dataset,
         model=args.model,
+        base_url=base_url,
+        api_key=api_key,
         num_agents=args.num_agents,
         num_rounds=args.num_rounds,
         single_temperature=args.single_temperature,
@@ -219,9 +225,6 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     if not comparison_df.empty:
         preview_cols = [
             "index",
-            "unique_id",
-            "year",
-            "problem_number",
             "ground_truth",
             "single_predicted",
             "single_correct",
@@ -237,6 +240,7 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
 
     print("\n=== Benchmark Summary ===")
     print(f"Dataset:                {summary['dataset']}")
+    print(f"Endpoint:               {summary['base_url']}")
     print(f"Model:                  {summary['model']}")
     print(f"Compared Samples:       {summary['compared_samples']} / {summary['requested_samples']}")
     print(f"Single-Agent Accuracy:  {summary['single_agent_accuracy']:.2%}")
@@ -253,10 +257,6 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     print(f"Single-Agent Errors:    {summary['single_error_breakdown']}")
     print(f"Debate Errors:          {summary['debate_error_breakdown']}")
     print(f"Total Answer Changes:   {summary['total_answer_changes']}")
-    if "year_breakdown" in summary:
-        print(f"By Year:                {summary['year_breakdown']}")
-    if "difficulty_tier_breakdown" in summary:
-        print(f"By Difficulty Tier:     {summary['difficulty_tier_breakdown']}")
     print(
         f"Execution Time:         single={_format_duration(summary['single_duration_seconds'])}, "
         f"debate={_format_duration(summary['debate_duration_seconds'])}, "

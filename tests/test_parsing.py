@@ -1,4 +1,4 @@
-"""Unit tests for AIME 3-digit integer parsing, extraction, matching, and dataset loading."""
+"""Unit tests for GSM8K parsing, \\boxed{...} extraction, dataset loading, and evaluation."""
 
 from __future__ import annotations
 
@@ -10,305 +10,183 @@ from unittest.mock import AsyncMock
 import pytest
 from google.genai import errors
 
-from gsm8k_debate.dataset import DEFAULT_AIME_DATASET, MathSample, load_aime_subset
+from gsm8k_debate.dataset import DEFAULT_GSM8K_DATASET, GSM8KSample, load_gsm8k_subset
 from gsm8k_debate.parsing import (
     answers_match,
-    extract_aime_answer,
-    extract_aime_ground_truth,
     extract_boxed_content,
     extract_boxed_number,
     extract_ground_truth_answer,
-    format_aime_answer,
-    parse_aime_answer,
-    parse_aime_ground_truth_candidates,
     parse_numeric_answer,
 )
-from gsm8k_debate.single_agent import _extract_retry_delay_seconds, evaluate_aime_subset
-
-
-def test_format_aime_answer() -> None:
-    assert format_aime_answer(0) == "000"
-    assert format_aime_answer(7) == "007"
-    assert format_aime_answer(42) == "042"
-    assert format_aime_answer(999) == "999"
-    with pytest.raises(ValueError, match="0..999"):
-        format_aime_answer(-1)
-    with pytest.raises(ValueError, match="0..999"):
-        format_aime_answer(1000)
+from gsm8k_debate.single_agent import _extract_retry_delay_seconds, evaluate_gsm8k_subset
 
 
 @pytest.mark.parametrize(
-    ("raw_value", "expected"),
+    ("raw_solution", "expected"),
     [
-        ("000", "000"),
-        ("004", "004"),
-        ("4", "004"),
-        ("033", "033"),
-        ("33", "033"),
-        ("999", "999"),
-        ("+042", "042"),
-        (r"\text{042}", "042"),
-        ("$007$", "007"),
-        ("n = 42", "042"),
-        ("Answer: 080", "080"),
-        ("#015", "015"),
-        ("42.0", "042"),
-        (r"\frac{126}{3}", "042"),
-        ("2^5", "032"),
+        ("Step 1...\n#### 18", Decimal(18)),
+        ("He makes $70,000 a year.\n#### 70,000", Decimal(70000)),
+        ("Balance is -4.5\n#### -4.5", Decimal("-4.5")),
     ],
 )
-def test_parse_aime_answer_normalizes_to_three_digits(
-    raw_value: str,
-    expected: str,
-) -> None:
-    assert parse_aime_answer(raw_value) == expected
+def test_extract_ground_truth_answer(raw_solution: str, expected: Decimal) -> None:
+    assert extract_ground_truth_answer(raw_solution) == expected
+
+
+def test_extract_ground_truth_answer_raises_without_marker() -> None:
+    with pytest.raises(ValueError, match="####"):
+        extract_ground_truth_answer("The answer is 42.")
 
 
 @pytest.mark.parametrize(
-    "raw_value",
+    ("text", "expected_content", "expected_number"),
     [
-        None,
-        "",
-        "   ",
-        "-1",
-        "-042",
-        "1000",
-        "1234",
-        "42.5",
-        r"\frac{1}{2}",
-        r"3\sqrt{13}",
-        "080 or 081",
-        "x + 1",
+        (r"Therefore, the answer is \boxed{18}.", "18", Decimal(18)),
+        (r"First \boxed{10}, actually final is \boxed{70,000}.", "70,000", Decimal(70000)),
+        (r"Cost is $\boxed{\$42.50}$.", r"\$42.50", Decimal("42.50")),
+        (r"Result: \boxed{18\text{ apples}}", r"18\text{ apples}", Decimal(18)),
+        (r"Ratio is \boxed{\frac{3}{2}}", r"\frac{3}{2}", Decimal("1.5")),
+        (r"Mixed: \boxed{4\frac{1}{2}}", r"4\frac{1}{2}", Decimal("4.5")),
+        (r"Nested: \boxed{\boxed{042}}", "042", Decimal(42)),
+        (r"Value: \boxed{x = -12}", "x = -12", Decimal(-12)),
+        (r"No boxed answer here: 42.", None, None),
     ],
 )
-def test_parse_aime_answer_rejects_invalid_or_out_of_range(raw_value: str | None) -> None:
-    assert parse_aime_answer(raw_value) is None
-
-
-@pytest.mark.parametrize(
-    ("text", "expected_box", "expected_aime"),
-    [
-        (r"Therefore, the answer is \boxed{033}.", "033", "033"),
-        (r"Thus we obtain \boxed{4}.", "4", "004"),
-        (r"AoPS solution gives \framebox{204} minutes.", "204", "204"),
-        (r"Or \fbox{007} at the end.", "007", "007"),
-        (r"First \boxed{10}, corrected to \boxed{\boxed{042}}.", "042", "042"),
-        (r"Out of range for AIME: \boxed{1024}.", "1024", None),
-        (r"Not an integer: \boxed{\frac{3}{2}}.", r"\frac{3}{2}", None),
-        ("No boxed answer: 042.", None, None),
-    ],
-)
-def test_extract_aime_answer(
+def test_extract_boxed_number(
     text: str,
-    expected_box: str | None,
-    expected_aime: str | None,
+    expected_content: str | None,
+    expected_number: Decimal | None,
 ) -> None:
-    assert extract_boxed_content(text) == expected_box
-    assert extract_aime_answer(text) == expected_aime
+    assert extract_boxed_content(text) == expected_content
+    assert extract_boxed_number(text) == expected_number
 
 
-def test_parse_aime_ground_truth_candidates_and_extract() -> None:
-    assert parse_aime_ground_truth_candidates("033") == ("033",)
-    assert parse_aime_ground_truth_candidates("4") == ("004",)
-    assert parse_aime_ground_truth_candidates(r"Steps...\framebox{204}") == ("204",)
-    assert parse_aime_ground_truth_candidates("080 or 081 (both were accepted)") == (
-        "080",
-        "081",
-    )
-    assert extract_aime_ground_truth("080 or 081 (both were accepted)") == "080"
-    assert extract_ground_truth_answer("7") == "007"
-    with pytest.raises(ValueError, match="000-999"):
-        extract_aime_ground_truth("not a number")
-
-
-def test_answers_match_aime_and_legacy_helpers() -> None:
-    assert answers_match("4", "004")
-    assert answers_match("042", "42")
-    assert answers_match("081", "080 or 081 (both were accepted)")
-    assert answers_match("081", "080", accepted_answers=("080", "081"))
-    assert not answers_match("082", "080", accepted_answers=("080", "081"))
-    assert not answers_match("042", "420")
-    assert not answers_match("1042", "042")
-    assert not answers_match(None, "042")
-
+def test_parse_numeric_answer_handles_negatives_and_percentages() -> None:
     assert parse_numeric_answer("-$1,250") == Decimal(-1250)
-    assert extract_boxed_number(r"\boxed{033}") == Decimal(33)
+    assert parse_numeric_answer(r"25\%") == Decimal(25)
+    assert parse_numeric_answer("not a number") is None
+    assert parse_numeric_answer(None) is None
 
 
-def test_load_aime_subset_defaults_to_hardest_problems_and_supports_all_schemas(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    aimo_rows = [
-        {
-            "id": 0,
-            "problem": "Find $N \\pmod{1000}$.",
-            "solution": r"Working gives \boxed{033}.",
-            "answer": "033",
-            "url": "https://artofproblemsolving.com/wiki/index.php/2024_AIME_II_Problems/Problem_15",
-        },
-        {
-            "id": 1,
-            "problem": "Find $k$.",
-            "solution": r"Simple case gives \framebox{4}.",
-            "answer": "",
-            "url": "https://artofproblemsolving.com/wiki/index.php/2023_AIME_I_Problems/Problem_3",
-        },
-        {
-            "id": 2,
-            "problem": "Hard combinatorics.",
-            "solution": r"Casework yields \boxed{150}.",
-            "answer": "150",
-            "url": "https://artofproblemsolving.com/wiki/index.php/2022_AIME_I_Problems/Problem_11",
-        },
-    ]
-    historical_rows = [
-        {
-            "ID": "1983-1",
-            "Year": 1983,
-            "Problem Number": 1,
-            "Question": "Compute $\\log_z w$.",
-            "Answer": "60",
-            "Part": None,
-        },
-        {
-            "ID": "2022-II-8",
-            "Year": 2022,
-            "Problem Number": 8,
-            "Question": "Floor question.",
-            "Answer": "080 or 081 (both were accepted)",
-            "Part": "II",
-        },
-        {
-            "ID": "2024-II-14",
-            "Year": 2024,
-            "Problem Number": 14,
-            "Question": "Hard historical problem.",
-            "Answer": "7",
-            "Part": "II",
-        },
+def test_answers_match() -> None:
+    assert answers_match(Decimal("18.00"), Decimal(18))
+    assert answers_match(Decimal("0.3333333"), Decimal(1) / Decimal(3))
+    assert not answers_match(None, Decimal(18))
+    assert not answers_match(Decimal(19), Decimal(18))
+
+
+def test_load_gsm8k_subset(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rows = [
+        {"question": "Janet eats 3 of 16 eggs...", "answer": "Steps\n#### 18"},
+        {"question": "A robe takes 2 bolts...", "answer": "Steps\n#### 3"},
+        {"question": "Josh buys a house...", "answer": "Steps\n#### 70,000"},
     ]
 
-    def _fake_load(name: str, split: str = "train"):
-        del split
-        if name == DEFAULT_AIME_DATASET:
-            return aimo_rows
-        return historical_rows
+    def _fake_load(dataset_name: str, config_name: str | None = None, split: str = "test"):
+        assert dataset_name == DEFAULT_GSM8K_DATASET
+        assert config_name == "main"
+        assert split == "test"
+        return fake_rows
 
     monkeypatch.setattr("gsm8k_debate.dataset.load_dataset", _fake_load)
 
-    # Default filter keeps only problems 11-15.
-    aimo_hard = load_aime_subset(num_samples=5)
-    assert [sample.unique_id for sample in aimo_hard] == ["2024-II-15", "2022-I-11"]
-    assert all(11 <= (sample.problem_number or 0) <= 15 for sample in aimo_hard)
-    assert aimo_hard[0].ground_truth == "033"
-    assert aimo_hard[0].year == 2024
-    assert aimo_hard[0].part == "II"
-    assert aimo_hard[0].problem_number == 15
+    samples = load_gsm8k_subset(num_samples=2)
+    assert len(samples) == 2
+    assert samples[0].index == 0
+    assert samples[0].ground_truth == Decimal(18)
+    assert samples[1].ground_truth == Decimal(3)
 
-    # Explicit override can still load problems 1-15.
-    aimo_all = load_aime_subset(num_samples=5, min_problem=1, max_problem=15)
-    assert [sample.unique_id for sample in aimo_all] == ["2024-II-15", "2023-I-3", "2022-I-11"]
-    assert aimo_all[1].ground_truth == "004"
-
-    year_hard = load_aime_subset(num_samples=5, year=2024)
-    assert len(year_hard) == 1
-    assert year_hard[0].unique_id == "2024-II-15"
-
-    hist_hard = load_aime_subset(
-        num_samples=5, dataset_name="di-zhang-fdu/AIME_1983_2024"
-    )
-    assert [sample.unique_id for sample in hist_hard] == ["2024-II-14"]
-    assert hist_hard[0].ground_truth == "007"
-
-    hist_all = load_aime_subset(
-        num_samples=5,
-        dataset_name="di-zhang-fdu/AIME_1983_2024",
-        min_problem=None,
-        max_problem=None,
-    )
-    assert hist_all[0].ground_truth == "060"
-    assert hist_all[0].unique_id == "1983-1"
-    assert hist_all[1].ground_truth == "080"
-    assert hist_all[1].accepted_answers == ("080", "081")
+    all_shuffled = load_gsm8k_subset(num_samples=3, shuffle=True, seed=42)
+    assert {s.ground_truth for s in all_shuffled} == {Decimal(18), Decimal(3), Decimal(70000)}
 
 
-def test_evaluate_aime_subset_with_mocked_client() -> None:
+def test_evaluate_gsm8k_subset_with_mocked_client() -> None:
     samples = [
-        MathSample(
-            index=0,
-            question="Compute $N \\pmod{1000}$.",
-            raw_answer=r"\boxed{033}",
-            ground_truth="033",
-            year=2024,
-            part="II",
-            problem_number=15,
-            unique_id="2024-II-15",
-        ),
-        MathSample(
-            index=1,
-            question="Find $k$.",
-            raw_answer="004",
-            ground_truth="004",
-            year=2023,
-            part="I",
-            problem_number=3,
-            unique_id="2023-I-3",
-        ),
-        MathSample(
-            index=2,
-            question="Compute remainder.",
-            raw_answer="008",
-            ground_truth="008",
-            year=2022,
-            part="I",
-            problem_number=1,
-            unique_id="2022-I-1",
-        ),
+        GSM8KSample(index=0, question="2+2?", raw_answer="#### 4", ground_truth=Decimal(4)),
+        GSM8KSample(index=1, question="3*5?", raw_answer="#### 15", ground_truth=Decimal(15)),
+        GSM8KSample(index=2, question="9-1?", raw_answer="#### 8", ground_truth=Decimal(8)),
     ]
 
     responses = [
-        SimpleNamespace(text=r"After casework we get \boxed{33}."),
-        SimpleNamespace(text=r"Oops forgot mod 1000: \boxed{1004}"),
-        SimpleNamespace(text="The answer is 008."),  # missing \boxed{}
+        SimpleNamespace(text=r"2 + 2 = 4. \boxed{4}"),
+        SimpleNamespace(text=r"3 * 5 = 14. \boxed{14}"),
+        SimpleNamespace(text="The answer is 8."),  # missing \boxed{}
     ]
     mock_generate = AsyncMock(side_effect=responses)
     mock_client = SimpleNamespace(
         aio=SimpleNamespace(models=SimpleNamespace(generate_content=mock_generate))
     )
 
-    df, metrics = asyncio.run(evaluate_aime_subset(samples, client=mock_client, max_concurrency=2))
+    df, metrics = asyncio.run(evaluate_gsm8k_subset(samples, client=mock_client, max_concurrency=2))
 
     assert len(df) == 3
-    assert df.loc[0, "predicted"] == "033"
-    assert bool(df.loc[0, "is_correct"]) is True
-    assert pd_isna(df.loc[1, "predicted"])
     assert metrics["total"] == 3
     assert metrics["correct"] == 1
     assert metrics["accuracy"] == pytest.approx(1 / 3)
     assert metrics["boxed_parsed"] == 2
-    assert metrics["parsed_answers"] == 1
+    assert metrics["numeric_parsed"] == 2
     assert metrics["errors"] == 0
 
 
-def pd_isna(value: object) -> bool:
-    return value is None
-
-
-def test_evaluate_aime_subset_retries_transient_server_error() -> None:
+def test_evaluate_gsm8k_subset_with_openai_compatible_client() -> None:
     samples = [
-        MathSample(index=0, question="2+2?", raw_answer="004", ground_truth="004"),
+        GSM8KSample(
+            index=0,
+            question="Janet's ducks lay 16 eggs...",
+            raw_answer="#### 18",
+            ground_truth=Decimal(18),
+        )
+    ]
+
+    recorded_calls: list[dict[str, object]] = []
+
+    async def _create(*, model: str, messages: list[dict[str, str]], temperature: float):
+        recorded_calls.append({"model": model, "messages": messages, "temperature": temperature})
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="<think>16 - 3 - 4 = 9 eggs; 9 * 2 = 18.</think>\n"
+                        + r"Hence \boxed{18}."
+                    )
+                )
+            ]
+        )
+
+    fake_openai_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_create))
+    )
+    df, metrics = asyncio.run(
+        evaluate_gsm8k_subset(samples, client=fake_openai_client, max_concurrency=1)
+    )
+
+    assert len(recorded_calls) == 1
+    assert recorded_calls[0]["model"] == "qwen2.5:7b"
+    assert recorded_calls[0]["messages"][0]["role"] == "system"
+    assert recorded_calls[0]["messages"][1] == {
+        "role": "user",
+        "content": "Janet's ducks lay 16 eggs...",
+    }
+    assert df.loc[0, "predicted"] == Decimal(18)
+    assert metrics["correct"] == 1
+    assert metrics["model"] == "qwen2.5:7b"
+
+
+def test_evaluate_gsm8k_subset_retries_transient_server_error() -> None:
+    samples = [
+        GSM8KSample(index=0, question="2+2?", raw_answer="#### 4", ground_truth=Decimal(4)),
     ]
 
     transient_503 = errors.ServerError(503, {"error": {"message": "busy"}}, None)
     mock_generate = AsyncMock(
-        side_effect=[transient_503, SimpleNamespace(text=r"Answer: \boxed{004}")]
+        side_effect=[transient_503, SimpleNamespace(text=r"Answer: \boxed{4}")]
     )
     mock_client = SimpleNamespace(
         aio=SimpleNamespace(models=SimpleNamespace(generate_content=mock_generate))
     )
 
     df, metrics = asyncio.run(
-        evaluate_aime_subset(
+        evaluate_gsm8k_subset(
             samples,
             client=mock_client,
             max_retries=2,

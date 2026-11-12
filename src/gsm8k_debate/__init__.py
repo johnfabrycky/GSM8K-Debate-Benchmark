@@ -1,4 +1,4 @@
-"""gsm8k-debate package initialization (AIME Olympiad benchmark support)."""
+"""gsm8k-debate package initialization (GSM8K multi-agent debate benchmark)."""
 
 from gsm8k_debate.benchmark import (
     build_comparison_dataframe,
@@ -8,17 +8,24 @@ from gsm8k_debate.benchmark import (
     summarize_benchmark,
 )
 from gsm8k_debate.checkpoint import PreemptionMonitor, PreemptionRequestedError
-from gsm8k_debate.config import create_genai_client, get_gemini_api_key
+from gsm8k_debate.config import (
+    DEFAULT_MODEL,
+    DEFAULT_OLLAMA_API_KEY,
+    DEFAULT_OLLAMA_BASE_URL,
+    create_genai_client,
+    create_llm_client,
+    create_openai_client,
+    get_gemini_api_key,
+    get_openai_api_key,
+    get_openai_base_url,
+)
 from gsm8k_debate.dataset import (
-    DEFAULT_AIME_DATASET,
-    DEFAULT_MAX_PROBLEM,
-    DEFAULT_MIN_PROBLEM,
-    AimeSample,
+    DEFAULT_GSM8K_CONFIG,
+    DEFAULT_GSM8K_DATASET,
+    DEFAULT_GSM8K_SPLIT,
     GSM8KSample,
     MathSample,
-    load_aime_subset,
     load_gsm8k_subset,
-    load_math500_subset,
 )
 from gsm8k_debate.debate import (
     DEFAULT_DEBATE_TEMPERATURE,
@@ -42,38 +49,31 @@ from gsm8k_debate.error_analysis import (
 )
 from gsm8k_debate.parsing import (
     answers_match,
-    extract_aime_answer,
-    extract_aime_ground_truth,
     extract_boxed_content,
     extract_boxed_number,
     extract_ground_truth_answer,
-    extract_math_answer,
-    format_aime_answer,
-    normalize_latex_answer,
-    parse_aime_answer,
-    parse_aime_ground_truth_candidates,
-    parse_math_answer,
     parse_numeric_answer,
 )
 from gsm8k_debate.single_agent import (
     DEFAULT_FLASH_MODEL,
     SingleAgentResult,
-    evaluate_aime_subset,
     evaluate_gsm8k_subset,
     evaluate_math_subset,
     solve_math_question,
 )
 
 __all__ = [
-    "DEFAULT_AIME_DATASET",
     "DEFAULT_DEBATE_TEMPERATURE",
     "DEFAULT_FLASH_MODEL",
-    "DEFAULT_MAX_PROBLEM",
-    "DEFAULT_MIN_PROBLEM",
+    "DEFAULT_GSM8K_CONFIG",
+    "DEFAULT_GSM8K_DATASET",
+    "DEFAULT_GSM8K_SPLIT",
+    "DEFAULT_MODEL",
     "DEFAULT_NUM_AGENTS",
     "DEFAULT_NUM_ROUNDS",
+    "DEFAULT_OLLAMA_API_KEY",
+    "DEFAULT_OLLAMA_BASE_URL",
     "AgentRoundLog",
-    "AimeSample",
     "DebateAgent",
     "DebateSampleResult",
     "ErrorClassification",
@@ -90,27 +90,20 @@ __all__ = [
     "classify_response_error",
     "compute_majority_vote",
     "create_genai_client",
-    "evaluate_aime_subset",
+    "create_llm_client",
+    "create_openai_client",
     "evaluate_debate_subset",
     "evaluate_gsm8k_subset",
     "evaluate_math_subset",
-    "extract_aime_answer",
-    "extract_aime_ground_truth",
     "extract_boxed_content",
     "extract_boxed_number",
     "extract_ground_truth_answer",
-    "extract_math_answer",
     "find_arithmetic_slips",
-    "format_aime_answer",
     "format_debate_trace",
     "get_gemini_api_key",
-    "load_aime_subset",
+    "get_openai_api_key",
+    "get_openai_base_url",
     "load_gsm8k_subset",
-    "load_math500_subset",
-    "normalize_latex_answer",
-    "parse_aime_answer",
-    "parse_aime_ground_truth_candidates",
-    "parse_math_answer",
     "parse_numeric_answer",
     "run_benchmark_comparison",
     "run_debate_for_sample",

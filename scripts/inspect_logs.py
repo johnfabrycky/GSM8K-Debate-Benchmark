@@ -17,10 +17,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-file",
         type=Path,
-        default=Path("logs/aime/debate_logs.json"),
+        default=Path("logs/debate_logs.json"),
         help=(
             "Path to debate_logs.json or debate_checkpoint.jsonl "
-            "(default: logs/aime/debate_logs.json)."
+            "(default: logs/debate_logs.json)."
         ),
     )
     parser.add_argument(

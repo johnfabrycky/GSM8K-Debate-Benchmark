@@ -1,4 +1,4 @@
-"""Error taxonomy and heuristic arithmetic-vs-logic classification for math outputs."""
+"""Error taxonomy and heuristic arithmetic-vs-logic classification for GSM8K outputs."""
 
 from __future__ import annotations
 
@@ -91,8 +91,14 @@ def _safe_eval_arithmetic(expr: str) -> Decimal | None:
 
 def find_arithmetic_slips(response_text: str) -> list[str]:
     """Detect explicit arithmetic equation mismatches in a model's derivation text."""
+    analysis_text = response_text
+    if "</think>" in response_text:
+        after_think = response_text.rsplit("</think>", 1)[-1].strip()
+        if after_think:
+            analysis_text = after_think
+
     slips: list[str] = []
-    for raw_line in response_text.splitlines():
+    for raw_line in analysis_text.splitlines():
         # Skip lines involving percentages so "50% * 20 = 10" isn't misread as 50 * 20.
         if "%" in raw_line:
             continue
@@ -120,7 +126,7 @@ def classify_response_error(
     *,
     is_correct: bool,
     response_text: str,
-    predicted: str | Decimal | None,
+    predicted: Decimal | str | int | None,
     error_message: str | None = None,
 ) -> ErrorClassification:
     """Classify why a model output was incorrect (or return 'none' if correct)."""
@@ -131,7 +137,7 @@ def classify_response_error(
     if predicted is None:
         return ErrorClassification(
             error_type=ERROR_FORMAT_PARSE,
-            detail="Missing or invalid \\boxed{XXX} 3-digit AIME integer (000-999)",
+            detail="Missing or unparseable \\boxed{answer}",
         )
 
     slips = find_arithmetic_slips(response_text)
@@ -143,5 +149,5 @@ def classify_response_error(
 
     return ErrorClassification(
         error_type=ERROR_CONCEPTUAL_LOGIC,
-        detail="Arithmetic steps valid/unflagged, but proof, algebra, or logic differs",
+        detail="Arithmetic steps valid/unflagged, but problem formulation or logic differs",
     )

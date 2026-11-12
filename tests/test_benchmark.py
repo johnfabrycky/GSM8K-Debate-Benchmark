@@ -1,9 +1,10 @@
-"""Unit tests for Single-Agent vs. Multi-Agent Debate AIME comparison and summaries."""
+"""Unit tests for Single-Agent vs. Multi-Agent Debate GSM8K comparison and summaries."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +18,7 @@ from gsm8k_debate.benchmark import (
     save_benchmark_outputs,
     summarize_benchmark,
 )
-from gsm8k_debate.dataset import DEFAULT_AIME_DATASET, MathSample
+from gsm8k_debate.dataset import DEFAULT_GSM8K_DATASET, GSM8KSample
 
 
 def test_classify_outcome() -> None:
@@ -32,24 +33,16 @@ def test_build_comparison_dataframe_and_summarize() -> None:
         [
             {
                 "index": 0,
-                "unique_id": "2024-II-15",
-                "year": 2024,
-                "part": "II",
-                "problem_number": 15,
-                "ground_truth": "315",
-                "boxed_raw": "300",
-                "predicted": "300",
+                "ground_truth": Decimal(14),
+                "boxed_raw": "11",
+                "predicted": Decimal(11),
                 "is_correct": False,
             },
             {
                 "index": 1,
-                "unique_id": "2022-I-3",
-                "year": 2022,
-                "part": "I",
-                "problem_number": 3,
-                "ground_truth": "042",
-                "boxed_raw": "42",
-                "predicted": "042",
+                "ground_truth": Decimal(8),
+                "boxed_raw": "8",
+                "predicted": Decimal(8),
                 "is_correct": True,
             },
         ]
@@ -58,20 +51,22 @@ def test_build_comparison_dataframe_and_summarize() -> None:
         [
             {
                 "index": 0,
-                "round_1_majority": "300",
-                "round_2_majority": "315",
-                "round_3_majority": "315",
-                "consensus_answer": "315",
+                "ground_truth": Decimal(14),
+                "round_1_majority": Decimal(11),
+                "round_2_majority": Decimal(14),
+                "round_3_majority": Decimal(14),
+                "consensus_answer": Decimal(14),
                 "is_correct": True,
                 "had_tie": False,
                 "answer_changes": 2,
             },
             {
                 "index": 1,
-                "round_1_majority": "042",
-                "round_2_majority": "042",
-                "round_3_majority": "042",
-                "consensus_answer": "042",
+                "ground_truth": Decimal(8),
+                "round_1_majority": Decimal(8),
+                "round_2_majority": Decimal(8),
+                "round_3_majority": Decimal(8),
+                "consensus_answer": Decimal(8),
                 "is_correct": True,
                 "had_tie": False,
                 "answer_changes": 0,
@@ -81,15 +76,12 @@ def test_build_comparison_dataframe_and_summarize() -> None:
 
     comp = build_comparison_dataframe(single_df, debate_df, num_rounds=3)
     assert list(comp["outcome"]) == ["debate_rescued", "both_correct"]
-    assert list(comp["unique_id"]) == ["2024-II-15", "2022-I-3"]
-    assert list(comp["year"]) == [2024, 2022]
-    assert list(comp["problem_number"]) == [15, 3]
 
     summary = summarize_benchmark(
         comp,
-        single_metrics={"model": "gemini-3.7-flash", "requested": 2, "total": 2, "accuracy": 0.5},
+        single_metrics={"model": "qwen2.5:7b", "requested": 2, "total": 2, "accuracy": 0.5},
         debate_metrics={
-            "model": "gemini-3.7-flash",
+            "model": "qwen2.5:7b",
             "total": 2,
             "accuracy": 1.0,
             "round_1_accuracy": 0.5,
@@ -97,10 +89,13 @@ def test_build_comparison_dataframe_and_summarize() -> None:
             "round_3_accuracy": 1.0,
             "total_answer_changes": 2,
         },
+        base_url="http://localhost:11434/v1",
         num_agents=3,
         num_rounds=3,
     )
-    assert summary["dataset"] == DEFAULT_AIME_DATASET
+    assert summary["dataset"] == DEFAULT_GSM8K_DATASET
+    assert summary["base_url"] == "http://localhost:11434/v1"
+    assert summary["model"] == "qwen2.5:7b"
     assert summary["single_agent_accuracy"] == pytest.approx(0.5)
     assert summary["debate_accuracy"] == pytest.approx(1.0)
     assert summary["accuracy_delta"] == pytest.approx(0.5)
@@ -110,26 +105,15 @@ def test_build_comparison_dataframe_and_summarize() -> None:
     assert summary["debate_max_api_calls"] == 18
     assert summary["single_error_breakdown"]["conceptual_logic_error"] == 1
     assert summary["debate_error_breakdown"]["arithmetic_slip"] == 0
-    assert summary["year_breakdown"]["2024"]["accuracy_delta"] == pytest.approx(1.0)
-    assert summary["difficulty_tier_breakdown"]["Problems 11-15"]["debate_accuracy"] == pytest.approx(
-        1.0
-    )
-    assert summary["difficulty_tier_breakdown"]["Problems 01-05"]["single_accuracy"] == pytest.approx(
-        1.0
-    )
 
 
 def test_run_benchmark_comparison_end_to_end(tmp_path: Path) -> None:
     samples = [
-        MathSample(
+        GSM8KSample(
             index=0,
-            question="Find the remainder modulo 1000.",
-            raw_answer=r"\boxed{042}",
-            ground_truth="042",
-            year=2024,
-            part="II",
-            problem_number=14,
-            unique_id="2024-II-14",
+            question="What is 3 * 4 + 2?",
+            raw_answer="#### 14",
+            ground_truth=Decimal(14),
         )
     ]
 
@@ -146,15 +130,15 @@ def test_run_benchmark_comparison_end_to_end(tmp_path: Path) -> None:
         ) -> SimpleNamespace:
             del model, config
             if isinstance(contents, str):
-                return SimpleNamespace(text=r"Off-by-one casework: \boxed{041}")
+                return SimpleNamespace(text=r"3*4=11? \boxed{11}")
 
             round_num = (len(contents) + 1) // 2
             if round_num == 1:
                 self.r1_calls += 1
                 if self.r1_calls == 1:
-                    return SimpleNamespace(text=r"AGENT1_R1 \boxed{041}")
-                return SimpleNamespace(text=r"AGENT_CORRECT_R1 \boxed{42}")
-            return SimpleNamespace(text=r"Updated after peer critique: \boxed{042}")
+                    return SimpleNamespace(text=r"AGENT1_R1 \boxed{11}")
+                return SimpleNamespace(text=r"AGENT_CORRECT_R1 \boxed{14}")
+            return SimpleNamespace(text=r"Updated after reading peers: \boxed{14}")
 
     fake_client = SimpleNamespace(aio=SimpleNamespace(models=_FakeBenchmarkModels()))
     comp_df, summary, debate_results, _, _ = asyncio.run(
@@ -174,7 +158,7 @@ def test_run_benchmark_comparison_end_to_end(tmp_path: Path) -> None:
         debate_results=debate_results,
     )
 
-    assert summary["dataset"] == DEFAULT_AIME_DATASET
+    assert summary["dataset"] == DEFAULT_GSM8K_DATASET
     assert summary["single_agent_accuracy"] == pytest.approx(0.0)
     assert summary["debate_accuracy"] == pytest.approx(1.0)
     assert summary["debate_rescued"] == 1

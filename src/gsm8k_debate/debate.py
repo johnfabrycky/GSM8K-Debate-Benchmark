@@ -5,17 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import httpx
-import httpx2
 import pandas as pd
-from google import genai
-from google.genai import errors, types
+from google.genai import types
 
 from gsm8k_debate.checkpoint import (
     PreemptionMonitor,
@@ -24,15 +22,19 @@ from gsm8k_debate.checkpoint import (
     atomic_write_text,
     load_jsonl_records,
 )
-from gsm8k_debate.config import create_genai_client
-from gsm8k_debate.dataset import MathSample
-from gsm8k_debate.llm import AsyncRateLimiter, generate_content_with_retry
+from gsm8k_debate.config import DEFAULT_MODEL, create_openai_client
+from gsm8k_debate.dataset import GSM8KSample
+from gsm8k_debate.llm import (
+    HANDLED_API_ERRORS,
+    AsyncRateLimiter,
+    close_client_if_owned,
+    generate_content_with_retry,
+)
 from gsm8k_debate.parsing import (
     answers_match,
     extract_boxed_content,
-    parse_aime_answer,
+    parse_numeric_answer,
 )
-from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +44,10 @@ DEFAULT_NUM_ROUNDS = 3
 DEFAULT_DEBATE_TEMPERATURE = 0.7
 
 DEBATE_SYSTEM_PROMPT = (
-    "You are an Olympiad-level mathematician participating in a multi-agent debate on "
-    "AIME (American Invitational Mathematics Examination) problems. Provide rigorous "
-    "step-by-step proofs and derivations, carefully checking modular arithmetic, casework, "
-    "overcounting/undercounting, and boundary conditions. Critically scrutinize peer "
-    "proofs when provided. Every AIME answer is a non-negative integer from 000 to 999 "
-    "inclusive; always conclude with only that exact 3-digit integer (zero-padded if below "
-    r"100, e.g., \boxed{042}) inside a single \boxed{XXX} expression."
+    "You are an expert mathematical problem solver participating in a multi-agent debate. "
+    "Solve grade-school math word problems carefully step by step, verify all arithmetic, "
+    "and critically evaluate peer agents' reasoning when provided. "
+    r"Always conclude with your final numerical answer in the form \boxed{answer}."
 )
 
 
@@ -57,7 +56,7 @@ class DebateAgent:
     """Independent debate agent instance maintaining its own multi-turn history."""
 
     agent_id: int
-    model: str = DEFAULT_FLASH_MODEL
+    model: str = DEFAULT_MODEL
     temperature: float = DEFAULT_DEBATE_TEMPERATURE
     history: list[types.Content] = field(default_factory=list)
 
@@ -99,43 +98,38 @@ class AgentRoundLog:
     prompt_sent: str
     response_text: str
     boxed_raw: str | None
-    predicted: str | None
+    predicted: Decimal | None
     changed_from_prev_round: bool
     error: str | None = None
 
 
 @dataclass(frozen=True)
 class DebateSampleResult:
-    """Complete multi-round debate trace and consensus outcome for one sample."""
+    """Complete multi-round debate trace and consensus outcome for one GSM8K sample."""
 
     index: int
     question: str
-    ground_truth: str
+    ground_truth: Decimal
     num_agents: int
     num_rounds: int
     round_logs: list[AgentRoundLog]
-    round_majority_answers: dict[int, str | None]
-    final_agent_answers: list[str | None]
-    consensus_answer: str | None
+    round_majority_answers: dict[int, Decimal | None]
+    final_agent_answers: list[Decimal | None]
+    consensus_answer: Decimal | None
     vote_counts: dict[str, int]
     had_tie: bool
     is_correct: bool
     answer_changes: int
     errors: int
-    year: int | None = None
-    part: str | None = None
-    problem_number: int | None = None
-    unique_id: str | None = None
-    accepted_answers: tuple[str, ...] = ()
 
 
 @dataclass
 class DebateCheckpointState:
-    """Recovered round-level debate progress for a single sample."""
+    """Recovered round-level debate progress for a single GSM8K sample."""
 
     sample_index: int
     question: str
-    ground_truth: str
+    ground_truth: Decimal
     num_agents: int
     num_rounds: int
     rounds: dict[int, list[AgentRoundLog]] = field(default_factory=dict)
@@ -150,7 +144,7 @@ def serialize_agent_round_log(log: AgentRoundLog) -> dict[str, Any]:
         "prompt_sent": log.prompt_sent,
         "response_text": log.response_text,
         "boxed_raw": log.boxed_raw,
-        "predicted": log.predicted,
+        "predicted": str(log.predicted) if log.predicted is not None else None,
         "changed_from_prev_round": log.changed_from_prev_round,
         "error": log.error,
     }
@@ -166,7 +160,7 @@ def deserialize_agent_round_log(data: dict[str, Any]) -> AgentRoundLog:
         prompt_sent=str(data["prompt_sent"]),
         response_text=str(data["response_text"]),
         boxed_raw=(str(data["boxed_raw"]) if data.get("boxed_raw") is not None else None),
-        predicted=str(predicted_raw) if predicted_raw is not None else None,
+        predicted=Decimal(str(predicted_raw)) if predicted_raw is not None else None,
         changed_from_prev_round=bool(data.get("changed_from_prev_round", False)),
         error=str(data["error"]) if data.get("error") is not None else None,
     )
@@ -186,7 +180,7 @@ def load_debate_checkpoint(path: Path) -> dict[int, DebateCheckpointState]:
             state = DebateCheckpointState(
                 sample_index=sample_index,
                 question=str(record["question"]),
-                ground_truth=str(record["ground_truth"]),
+                ground_truth=Decimal(str(record["ground_truth"])),
                 num_agents=int(record["num_agents"]),
                 num_rounds=int(record["num_rounds"]),
             )
@@ -200,16 +194,13 @@ def load_debate_checkpoint(path: Path) -> dict[int, DebateCheckpointState]:
 
 
 def build_round1_prompt(question: str) -> str:
-    """Build the initial Round 1 independent AIME Olympiad reasoning prompt."""
+    """Build the initial Round 1 independent reasoning prompt."""
     return (
-        "Solve the following AIME (American Invitational Mathematics Examination) "
-        "Olympiad problem:\n\n"
+        "Can you solve the following math problem?\n\n"
         f"{question}\n\n"
-        "Show a rigorous step-by-step proof and calculation, checking all casework, "
-        "modular reductions, and potential edge cases. Because this is an AIME problem, "
-        "the answer is an integer from 000 to 999 inclusive. Provide only your final "
-        r"3-digit integer answer (zero-padded if below 100, e.g. \boxed{042}) in the form "
-        r"\boxed{XXX} at the end of your response."
+        "Explain your reasoning step by step. "
+        "Your final answer should be a single numerical number, "
+        r"in the form \boxed{answer}, at the end of your response."
     )
 
 
@@ -223,69 +214,47 @@ def build_consensus_prompt(
         for peer_id, response in peer_responses
     )
     return (
-        "These are the solutions to the AIME Olympiad problem from other agents:\n\n"
+        "These are the solutions to the problem from other agents:\n\n"
         f"{formatted_peers}\n\n"
-        "Using the solutions from other agents as additional information, critically inspect "
-        "their proofs, casework, modular arithmetic, counting arguments, and intermediate "
-        "calculations. Identify any logical flaws or off-by-one/overcounting slips, verify "
-        "disagreements independently, and provide your updated rigorous derivation.\n\n"
-        f"Original AIME problem: {question}\n\n"
-        "Conclude with only the exact 3-digit integer answer (000-999, e.g. "
-        r"\boxed{042}) in the form \boxed{XXX} at the end of your response."
+        "Using the solutions from other agents as additional information, "
+        "critique where their reasoning agrees or differs from yours, verify the calculations, "
+        "and provide your updated reasoning and answer to the math problem.\n\n"
+        f"Original math problem: {question}\n\n"
+        "Your final answer should be a single numerical number, "
+        r"in the form \boxed{answer}, at the end of your response."
     )
 
 
 def compute_majority_vote(
-    answers: Sequence[str | Decimal | None],
-) -> tuple[str | None, dict[str, int], bool]:
-    """Aggregate agent predictions by majority vote, canonicalizing AIME 3-digit integers."""
-    clusters: list[tuple[str, int]] = []
-    for raw in answers:
-        if raw is None:
-            continue
-        ans_str = str(raw).strip()
-        if not ans_str:
-            continue
-        if (aime_norm := parse_aime_answer(ans_str)) is not None:
-            ans_str = aime_norm
-
-        matched_idx = next(
-            (idx for idx, (rep, _) in enumerate(clusters) if answers_match(ans_str, rep)),
-            None,
-        )
-        if matched_idx is not None:
-            rep, count = clusters[matched_idx]
-            better_rep = rep if parse_aime_answer(rep) is not None else (
-                ans_str if len(ans_str) < len(rep) else rep
-            )
-            clusters[matched_idx] = (better_rep, count + 1)
-        else:
-            clusters.append((ans_str, 1))
-
-    if not clusters:
+    answers: Sequence[Decimal | None],
+) -> tuple[Decimal | None, dict[str, int], bool]:
+    """Aggregate agent predictions by majority vote, grouping numerically equal values."""
+    valid_answers = [ans for ans in answers if ans is not None]
+    if not valid_answers:
         return None, {}, False
 
-    ranked = sorted(clusters, key=lambda item: -item[1])
+    counts = Counter(valid_answers)
+    ranked = counts.most_common()
     top_value, top_count = ranked[0]
     had_tie = len(ranked) > 1 and ranked[1][1] == top_count
-    vote_counts = {value: count for value, count in ranked}
+    vote_counts = {str(value): count for value, count in ranked}
     return top_value, vote_counts, had_tie
 
 
-def _answer_changed(prev_predicted: str | None, predicted: str | None) -> bool:
+def _answer_changed(prev_predicted: Decimal | None, predicted: Decimal | None) -> bool:
     if prev_predicted is None or predicted is None:
         return prev_predicted != predicted
     return not answers_match(predicted, prev_predicted)
 
 
 async def _run_agent_turn(
-    client: genai.Client,
+    client: Any,
     agent: DebateAgent,
     prompt: str,
     *,
     peer_agent_ids: list[int],
     round_num: int,
-    prev_predicted: str | None,
+    prev_predicted: Decimal | None,
     sample_index: int,
     semaphore: asyncio.Semaphore | None = None,
     rate_limiter: AsyncRateLimiter | None = None,
@@ -319,14 +288,7 @@ async def _run_agent_turn(
             if stop_event is not None and stop_event.is_set():
                 raise PreemptionRequestedError("Preemption requested before agent turn")
             response_text = await _call()
-    except (
-        errors.APIError,
-        httpx.HTTPError,
-        httpx2.HTTPError,
-        OSError,
-        TimeoutError,
-        ValueError,
-    ) as exc:
+    except (*HANDLED_API_ERRORS, ValueError) as exc:
         error_msg = f"{type(exc).__name__}: {exc}"
         fallback_response = f"[Agent {agent.agent_id} failed to respond: {error_msg}]"
         agent.record_turn(prompt, fallback_response)
@@ -351,7 +313,7 @@ async def _run_agent_turn(
 
     agent.record_turn(prompt, response_text)
     boxed_raw = extract_boxed_content(response_text)
-    predicted = parse_aime_answer(boxed_raw)
+    predicted = parse_numeric_answer(boxed_raw) if boxed_raw is not None else None
     changed = round_num > 1 and _answer_changed(prev_predicted, predicted)
 
     logger.info(
@@ -378,14 +340,15 @@ async def _run_agent_turn(
 
 
 async def run_debate_for_sample(
-    client: genai.Client,
-    sample: MathSample,
+    client: Any,
+    sample: GSM8KSample,
     *,
-    model: str = DEFAULT_FLASH_MODEL,
+    model: str = DEFAULT_MODEL,
     num_agents: int = DEFAULT_NUM_AGENTS,
     num_rounds: int = DEFAULT_NUM_ROUNDS,
     temperature: float = DEFAULT_DEBATE_TEMPERATURE,
     semaphore: asyncio.Semaphore | None = None,
+    max_concurrency: int | None = None,
     rate_limiter: AsyncRateLimiter | None = None,
     max_retries: int = 5,
     retry_base_delay: float = 2.0,
@@ -398,6 +361,10 @@ async def run_debate_for_sample(
         raise ValueError(f"num_agents must be at least 2 for debate, got {num_agents}")
     if num_rounds < 1:
         raise ValueError(f"num_rounds must be at least 1, got {num_rounds}")
+    if semaphore is None and max_concurrency is not None:
+        if max_concurrency <= 0:
+            raise ValueError(f"max_concurrency must be positive, got {max_concurrency}")
+        semaphore = asyncio.Semaphore(max_concurrency)
 
     agents = [
         DebateAgent(agent_id=i, model=model, temperature=temperature)
@@ -405,7 +372,7 @@ async def run_debate_for_sample(
     ]
     agents_by_id = {agent.agent_id: agent for agent in agents}
     all_round_logs: list[AgentRoundLog] = []
-    round_majority_answers: dict[int, str | None] = {}
+    round_majority_answers: dict[int, Decimal | None] = {}
     prev_logs_by_agent: dict[int, AgentRoundLog] = {}
 
     completed_round_num = 0
@@ -503,11 +470,7 @@ async def run_debate_for_sample(
     final_logs = [prev_logs_by_agent[agent.agent_id] for agent in agents]
     final_agent_answers = [log.predicted for log in final_logs]
     consensus_answer, vote_counts, had_tie = compute_majority_vote(final_agent_answers)
-    is_correct = answers_match(
-        consensus_answer,
-        sample.ground_truth,
-        accepted_answers=sample.accepted_answers,
-    )
+    is_correct = answers_match(consensus_answer, sample.ground_truth)
     answer_changes = sum(1 for log in all_round_logs if log.changed_from_prev_round)
     errors_count = sum(1 for log in all_round_logs if log.error is not None)
 
@@ -526,19 +489,16 @@ async def run_debate_for_sample(
         is_correct=is_correct,
         answer_changes=answer_changes,
         errors=errors_count,
-        year=sample.year,
-        part=sample.part,
-        problem_number=sample.problem_number,
-        unique_id=sample.unique_id,
-        accepted_answers=sample.accepted_answers,
     )
 
 
 async def evaluate_debate_subset(
-    samples: Sequence[MathSample],
+    samples: Sequence[GSM8KSample],
     *,
-    client: genai.Client | None = None,
-    model: str = DEFAULT_FLASH_MODEL,
+    client: Any = None,
+    model: str = DEFAULT_MODEL,
+    base_url: str | None = None,
+    api_key: str | None = None,
     num_agents: int = DEFAULT_NUM_AGENTS,
     num_rounds: int = DEFAULT_NUM_ROUNDS,
     temperature: float = DEFAULT_DEBATE_TEMPERATURE,
@@ -550,7 +510,7 @@ async def evaluate_debate_subset(
     resume: bool = False,
     preemption: PreemptionMonitor | None = None,
 ) -> tuple[list[DebateSampleResult], pd.DataFrame, dict[str, float | int | str | bool]]:
-    """Run multi-agent debate across a math subset with round-level checkpointing."""
+    """Run multi-agent debate across a GSM8K subset with round-level checkpointing."""
     if max_concurrency <= 0:
         raise ValueError(f"max_concurrency must be positive, got {max_concurrency}")
 
@@ -567,7 +527,7 @@ async def evaluate_debate_subset(
                 if state.question != sample.question:
                     raise ValueError(
                         f"Checkpoint sample {sample.index} does not match current dataset slice. "
-                        "Use the same --dataset/--num-samples/--shuffle/--seed/--year/problem filters "
+                        "Use the same --dataset/--config/--split/--num-samples/--shuffle/--seed "
                         "or omit --resume."
                     )
                 if state.num_agents != num_agents or state.num_rounds != num_rounds:
@@ -606,8 +566,11 @@ async def evaluate_debate_subset(
         or any(r not in checkpoints[sample.index].rounds for r in range(1, num_rounds + 1))
         for sample in samples
     )
+    owns_client = client is None and needs_client
     active_client: Any = (
-        client if client is not None else (create_genai_client() if needs_client else None)
+        client
+        if client is not None
+        else (create_openai_client(base_url=base_url, api_key=api_key) if needs_client else None)
     )
     semaphore = asyncio.Semaphore(max_concurrency)
     max_active_samples = max(1, (max_concurrency + num_agents - 1) // num_agents)
@@ -617,7 +580,7 @@ async def evaluate_debate_subset(
     )
     interrupted = False
 
-    async def _run_with_checkpoint(sample: MathSample) -> DebateSampleResult | None:
+    async def _run_with_checkpoint(sample: GSM8KSample) -> DebateSampleResult | None:
         prior_state = checkpoints.get(sample.index)
         prior_rounds = prior_state.rounds if prior_state is not None else None
 
@@ -630,7 +593,7 @@ async def evaluate_debate_subset(
                     "record_type": "round",
                     "sample_index": sample.index,
                     "question": sample.question,
-                    "ground_truth": sample.ground_truth,
+                    "ground_truth": str(sample.ground_truth),
                     "num_agents": num_agents,
                     "num_rounds": num_rounds,
                     "round_num": round_num,
@@ -662,24 +625,27 @@ async def evaluate_debate_subset(
             stop_event.set()
             return None
 
-    tasks = [asyncio.create_task(_run_with_checkpoint(sample)) for sample in samples]
-    total_requested = len(samples)
-    for completed_task in asyncio.as_completed(tasks):
-        res = await completed_task
-        if res is None:
-            interrupted = True
-        else:
-            completed_by_index[res.index] = res
-            logger.info(
-                "[Debate %d/%d] sample=%d consensus=%s gt=%s correct=%s changes=%d",
-                len(completed_by_index),
-                total_requested,
-                res.index,
-                res.consensus_answer,
-                res.ground_truth,
-                res.is_correct,
-                res.answer_changes,
-            )
+    try:
+        tasks = [asyncio.create_task(_run_with_checkpoint(sample)) for sample in samples]
+        total_requested = len(samples)
+        for completed_task in asyncio.as_completed(tasks):
+            res = await completed_task
+            if res is None:
+                interrupted = True
+            else:
+                completed_by_index[res.index] = res
+                logger.info(
+                    "[Debate %d/%d] sample=%d consensus=%s gt=%s correct=%s changes=%d",
+                    len(completed_by_index),
+                    total_requested,
+                    res.index,
+                    res.consensus_answer,
+                    res.ground_truth,
+                    res.is_correct,
+                    res.answer_changes,
+                )
+    finally:
+        await close_client_if_owned(active_client, owns_client=owns_client)
 
     if stop_event is not None and stop_event.is_set():
         interrupted = True
@@ -696,10 +662,6 @@ async def evaluate_debate_subset(
     for res in results:
         row: dict[str, object] = {
             "index": res.index,
-            "unique_id": res.unique_id,
-            "year": res.year,
-            "part": res.part,
-            "problem_number": res.problem_number,
             "ground_truth": res.ground_truth,
             "consensus_answer": res.consensus_answer,
             "is_correct": res.is_correct,
@@ -718,10 +680,6 @@ async def evaluate_debate_subset(
     if df.empty:
         base_cols = [
             "index",
-            "unique_id",
-            "year",
-            "part",
-            "problem_number",
             "ground_truth",
             "consensus_answer",
             "is_correct",
@@ -755,11 +713,7 @@ async def evaluate_debate_subset(
         round_correct = sum(
             1
             for res in results
-            if answers_match(
-                res.round_majority_answers.get(round_num),
-                res.ground_truth,
-                accepted_answers=res.accepted_answers,
-            )
+            if answers_match(res.round_majority_answers.get(round_num), res.ground_truth)
         )
         metrics[f"round_{round_num}_accuracy"] = round_correct / total if total else 0.0
 
@@ -773,22 +727,21 @@ def serialize_debate_results(results: Sequence[DebateSampleResult]) -> list[dict
         serialized.append(
             {
                 "index": res.index,
-                "unique_id": res.unique_id,
-                "year": res.year,
-                "part": res.part,
-                "problem_number": res.problem_number,
                 "question": res.question,
-                "ground_truth": res.ground_truth,
+                "ground_truth": str(res.ground_truth),
                 "num_agents": res.num_agents,
                 "num_rounds": res.num_rounds,
-                "consensus_answer": res.consensus_answer,
+                "consensus_answer": (
+                    str(res.consensus_answer) if res.consensus_answer is not None else None
+                ),
                 "is_correct": res.is_correct,
                 "had_tie": res.had_tie,
                 "vote_counts": res.vote_counts,
                 "answer_changes": res.answer_changes,
                 "errors": res.errors,
                 "round_majority_answers": {
-                    str(r): ans for r, ans in res.round_majority_answers.items()
+                    str(r): (str(ans) if ans is not None else None)
+                    for r, ans in res.round_majority_answers.items()
                 },
                 "round_logs": [serialize_agent_round_log(log) for log in res.round_logs],
             }
@@ -803,17 +756,9 @@ def save_debate_logs(results: Sequence[DebateSampleResult], output_path: Path) -
 
 
 def format_debate_trace(result: DebateSampleResult, *, max_chars: int = 500) -> str:
-    """Format a human-readable intermediate log trace for one problem."""
-    meta_parts: list[str] = []
-    if result.unique_id:
-        meta_parts.append(f"ID: {result.unique_id}")
-    if result.year is not None:
-        meta_parts.append(f"Year: {result.year}")
-    if result.problem_number is not None:
-        meta_parts.append(f"Problem: #{result.problem_number}")
-    meta = f" | {', '.join(meta_parts)}" if meta_parts else ""
+    """Format a human-readable intermediate log trace for one GSM8K sample."""
     lines = [
-        f"=== Sample {result.index} (Ground Truth: {result.ground_truth}{meta}) ===",
+        f"=== Sample {result.index} (Ground Truth: {result.ground_truth}) ===",
         f"Question: {result.question}",
     ]
 

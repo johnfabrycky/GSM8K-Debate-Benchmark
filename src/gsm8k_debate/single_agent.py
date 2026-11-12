@@ -1,4 +1,4 @@
-"""Single-agent Gemini Flash prompt execution and AIME Olympiad evaluation."""
+"""Single-agent prompt execution and GSM8K evaluation."""
 
 from __future__ import annotations
 
@@ -6,14 +6,11 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import httpx
-import httpx2
 import pandas as pd
-from google import genai
-from google.genai import errors
 
 from gsm8k_debate.checkpoint import (
     PreemptionMonitor,
@@ -21,30 +18,30 @@ from gsm8k_debate.checkpoint import (
     append_jsonl_record,
     load_jsonl_records,
 )
-from gsm8k_debate.config import create_genai_client
-from gsm8k_debate.dataset import MathSample
+from gsm8k_debate.config import DEFAULT_MODEL, create_openai_client
+from gsm8k_debate.dataset import GSM8KSample
 from gsm8k_debate.llm import (
+    HANDLED_API_ERRORS,
     AsyncRateLimiter,
+    close_client_if_owned,
     extract_retry_delay_seconds,
     generate_content_with_retry,
 )
 from gsm8k_debate.parsing import (
     answers_match,
     extract_boxed_content,
-    parse_aime_answer,
+    parse_numeric_answer,
 )
 
-DEFAULT_FLASH_MODEL = "gemini-3.7-flash"
+DEFAULT_FLASH_MODEL = DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 
 SINGLE_AGENT_SYSTEM_PROMPT = (
-    "You are an Olympiad-level mathematician solving an AIME (American Invitational "
-    "Mathematics Examination) problem. Provide a rigorous step-by-step proof and "
-    "derivation, carefully checking modular arithmetic, casework, boundary cases, and "
-    "counting symmetry. Every AIME answer is a non-negative integer from 000 to 999 "
-    "inclusive. Conclude with only that exact 3-digit integer (zero-padded if below 100, "
-    r"e.g., \boxed{042}, \boxed{007}, or \boxed{512}) inside a single \boxed{XXX} block."
+    "You are an expert mathematical problem solver. "
+    "Solve the grade-school math word problem carefully step by step. "
+    "At the very end of your response, put only the final numerical answer inside "
+    r"\boxed{...} (for example, \boxed{42})."
 )
 
 _extract_retry_delay_seconds = extract_retry_delay_seconds
@@ -52,20 +49,16 @@ _extract_retry_delay_seconds = extract_retry_delay_seconds
 
 @dataclass(frozen=True)
 class SingleAgentResult:
-    """Evaluation outcome for a single AIME problem."""
+    """Evaluation outcome for a single GSM8K question."""
 
     index: int
     question: str
-    ground_truth: str
+    ground_truth: Decimal
     raw_response: str
     boxed_raw: str | None
-    predicted: str | None
+    predicted: Decimal | None
     is_correct: bool
     error: str | None = None
-    year: int | None = None
-    part: str | None = None
-    problem_number: int | None = None
-    unique_id: str | None = None
 
 
 def serialize_single_agent_result(result: SingleAgentResult) -> dict[str, Any]:
@@ -73,41 +66,29 @@ def serialize_single_agent_result(result: SingleAgentResult) -> dict[str, Any]:
     return {
         "index": result.index,
         "question": result.question,
-        "ground_truth": result.ground_truth,
+        "ground_truth": str(result.ground_truth),
         "raw_response": result.raw_response,
         "boxed_raw": result.boxed_raw,
-        "predicted": result.predicted,
+        "predicted": str(result.predicted) if result.predicted is not None else None,
         "is_correct": result.is_correct,
         "error": result.error,
-        "year": result.year,
-        "part": result.part,
-        "problem_number": result.problem_number,
-        "unique_id": result.unique_id,
     }
 
 
 def deserialize_single_agent_result(payload: dict[str, Any]) -> SingleAgentResult:
     """Reconstruct a SingleAgentResult from a checkpoint dictionary."""
     predicted_raw = payload.get("predicted")
-    year_raw = payload.get("year")
-    prob_raw = payload.get("problem_number")
-    if prob_raw is None:
-        prob_raw = payload.get("level")
     return SingleAgentResult(
         index=int(payload["index"]),
         question=str(payload["question"]),
-        ground_truth=str(payload["ground_truth"]),
+        ground_truth=Decimal(str(payload["ground_truth"])),
         raw_response=str(payload.get("raw_response", "")),
         boxed_raw=(
             str(payload["boxed_raw"]) if payload.get("boxed_raw") is not None else None
         ),
-        predicted=str(predicted_raw) if predicted_raw is not None else None,
+        predicted=Decimal(str(predicted_raw)) if predicted_raw is not None else None,
         is_correct=bool(payload["is_correct"]),
         error=str(payload["error"]) if payload.get("error") is not None else None,
-        year=int(year_raw) if year_raw is not None else None,
-        part=str(payload["part"]) if payload.get("part") is not None else None,
-        problem_number=int(prob_raw) if prob_raw is not None else None,
-        unique_id=str(payload["unique_id"]) if payload.get("unique_id") is not None else None,
     )
 
 
@@ -122,17 +103,17 @@ def load_single_agent_checkpoint(path: Path) -> dict[int, SingleAgentResult]:
 
 
 async def solve_math_question(
-    client: genai.Client,
+    client: Any,
     question: str,
     *,
-    model: str = DEFAULT_FLASH_MODEL,
+    model: str = DEFAULT_MODEL,
     temperature: float = 0.0,
     max_retries: int = 5,
     retry_base_delay: float = 2.0,
     rate_limiter: AsyncRateLimiter | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> str:
-    """Query Gemini Flash asynchronously for an AIME Olympiad problem with retries."""
+    """Query the configured LLM asynchronously for a single GSM8K question with retries."""
     return await generate_content_with_retry(
         client,
         model=model,
@@ -147,10 +128,10 @@ async def solve_math_question(
 
 
 async def evaluate_sample(
-    client: genai.Client,
-    sample: MathSample,
+    client: Any,
+    sample: GSM8KSample,
     *,
-    model: str = DEFAULT_FLASH_MODEL,
+    model: str = DEFAULT_MODEL,
     semaphore: asyncio.Semaphore | None = None,
     rate_limiter: AsyncRateLimiter | None = None,
     temperature: float = 0.0,
@@ -158,7 +139,7 @@ async def evaluate_sample(
     retry_base_delay: float = 2.0,
     stop_event: asyncio.Event | None = None,
 ) -> SingleAgentResult:
-    """Run single-agent inference and 3-digit ``000``-``999`` AIME extraction for one sample."""
+    """Run single-agent inference and ``\\boxed{...}`` parsing for one GSM8K sample."""
 
     async def _run() -> str:
         return await solve_math_question(
@@ -182,14 +163,7 @@ async def evaluate_sample(
             if stop_event is not None and stop_event.is_set():
                 raise PreemptionRequestedError("Preemption requested before sample")
             raw_response = await _run()
-    except (
-        errors.APIError,
-        httpx.HTTPError,
-        httpx2.HTTPError,
-        OSError,
-        TimeoutError,
-        ValueError,
-    ) as exc:
+    except (*HANDLED_API_ERRORS, ValueError) as exc:
         return SingleAgentResult(
             index=sample.index,
             question=sample.question,
@@ -199,19 +173,11 @@ async def evaluate_sample(
             predicted=None,
             is_correct=False,
             error=f"{type(exc).__name__}: {exc}",
-            year=sample.year,
-            part=sample.part,
-            problem_number=sample.problem_number,
-            unique_id=sample.unique_id,
         )
 
     boxed_raw = extract_boxed_content(raw_response)
-    predicted = parse_aime_answer(boxed_raw)
-    is_correct = answers_match(
-        predicted,
-        sample.ground_truth,
-        accepted_answers=sample.accepted_answers,
-    )
+    predicted = parse_numeric_answer(boxed_raw) if boxed_raw is not None else None
+    is_correct = answers_match(predicted, sample.ground_truth)
 
     return SingleAgentResult(
         index=sample.index,
@@ -221,18 +187,16 @@ async def evaluate_sample(
         boxed_raw=boxed_raw,
         predicted=predicted,
         is_correct=is_correct,
-        year=sample.year,
-        part=sample.part,
-        problem_number=sample.problem_number,
-        unique_id=sample.unique_id,
     )
 
 
-async def evaluate_aime_subset(
-    samples: Sequence[MathSample],
+async def evaluate_gsm8k_subset(
+    samples: Sequence[GSM8KSample],
     *,
-    client: genai.Client | None = None,
-    model: str = DEFAULT_FLASH_MODEL,
+    client: Any = None,
+    model: str = DEFAULT_MODEL,
+    base_url: str | None = None,
+    api_key: str | None = None,
     max_concurrency: int = 3,
     requests_per_minute: float | None = None,
     temperature: float = 0.0,
@@ -242,7 +206,7 @@ async def evaluate_aime_subset(
     resume: bool = False,
     preemption: PreemptionMonitor | None = None,
 ) -> tuple[pd.DataFrame, dict[str, float | int | str | bool]]:
-    """Evaluate an AIME subset concurrently with optional checkpointing and resume."""
+    """Evaluate a GSM8K subset concurrently with optional checkpointing and resume."""
     if max_concurrency <= 0:
         raise ValueError(f"max_concurrency must be positive, got {max_concurrency}")
 
@@ -257,7 +221,7 @@ async def evaluate_aime_subset(
                 if prior is not None and prior.question != sample.question:
                     raise ValueError(
                         f"Checkpoint sample {sample.index} does not match current dataset slice. "
-                        "Use the same --dataset/--num-samples/--shuffle/--seed/--year/problem filters "
+                        "Use the same --dataset/--config/--split/--num-samples/--shuffle/--seed "
                         "or omit --resume."
                     )
         elif checkpoint_path.exists():
@@ -274,13 +238,18 @@ async def evaluate_aime_subset(
     interrupted = False
 
     if pending_samples:
-        active_client = client if client is not None else create_genai_client()
+        owns_client = client is None
+        active_client = (
+            client
+            if client is not None
+            else create_openai_client(base_url=base_url, api_key=api_key)
+        )
         semaphore = asyncio.Semaphore(max_concurrency)
         rate_limiter = (
             AsyncRateLimiter(requests_per_minute) if requests_per_minute is not None else None
         )
 
-        async def _eval_and_persist(sample: MathSample) -> SingleAgentResult | None:
+        async def _eval_and_persist(sample: GSM8KSample) -> SingleAgentResult | None:
             try:
                 result = await evaluate_sample(
                     active_client,
@@ -302,24 +271,26 @@ async def evaluate_aime_subset(
                 append_jsonl_record(checkpoint_path, serialize_single_agent_result(result))
             return result
 
-        tasks = [asyncio.create_task(_eval_and_persist(sample)) for sample in pending_samples]
-        total_requested = len(samples)
-        for completed_task in asyncio.as_completed(tasks):
-            res = await completed_task
-            if res is None:
-                interrupted = True
-            else:
-                completed_by_index[res.index] = res
-                logger.info(
-                    "[Single-Agent %d/%d] sample=%d (%s) predicted=%s gt=%s correct=%s",
-                    len(completed_by_index),
-                    total_requested,
-                    res.index,
-                    res.unique_id or res.index,
-                    res.predicted,
-                    res.ground_truth,
-                    res.is_correct,
-                )
+        try:
+            tasks = [asyncio.create_task(_eval_and_persist(sample)) for sample in pending_samples]
+            total_requested = len(samples)
+            for completed_task in asyncio.as_completed(tasks):
+                res = await completed_task
+                if res is None:
+                    interrupted = True
+                else:
+                    completed_by_index[res.index] = res
+                    logger.info(
+                        "[Single-Agent %d/%d] sample=%d predicted=%s gt=%s correct=%s",
+                        len(completed_by_index),
+                        total_requested,
+                        res.index,
+                        res.predicted,
+                        res.ground_truth,
+                        res.is_correct,
+                    )
+        finally:
+            await close_client_if_owned(active_client, owns_client=owns_client)
 
     if stop_event is not None and stop_event.is_set():
         interrupted = True
@@ -344,17 +315,13 @@ async def evaluate_aime_subset(
                 "predicted",
                 "is_correct",
                 "error",
-                "year",
-                "part",
-                "problem_number",
-                "unique_id",
             ]
         )
 
     total = len(results)
     correct = int(df["is_correct"].sum()) if total else 0
     boxed_parsed = int(df["boxed_raw"].notna().sum()) if total else 0
-    parsed_answers = int(df["predicted"].notna().sum()) if total else 0
+    numeric_parsed = int(df["predicted"].notna().sum()) if total else 0
     errors_count = int(df["error"].notna().sum()) if total else 0
 
     metrics: dict[str, float | int | str | bool] = {
@@ -364,15 +331,12 @@ async def evaluate_aime_subset(
         "correct": correct,
         "accuracy": correct / total if total else 0.0,
         "boxed_parsed": boxed_parsed,
-        "parsed_answers": parsed_answers,
-        "numeric_parsed": parsed_answers,
-        "parse_rate": parsed_answers / total if total else 0.0,
+        "numeric_parsed": numeric_parsed,
+        "parse_rate": numeric_parsed / total if total else 0.0,
         "errors": errors_count,
         "interrupted": interrupted,
     }
     return df, metrics
 
 
-# Preserve legacy evaluator aliases.
-evaluate_math_subset = evaluate_aime_subset
-evaluate_gsm8k_subset = evaluate_aime_subset
+evaluate_math_subset = evaluate_gsm8k_subset

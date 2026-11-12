@@ -1,4 +1,4 @@
-"""Side-by-side Single-Agent vs. Multi-Agent Debate benchmark comparison on AIME."""
+"""Side-by-side Single-Agent vs. Multi-Agent Debate benchmark comparison on GSM8K."""
 
 from __future__ import annotations
 
@@ -9,10 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from google import genai
 
 from gsm8k_debate.checkpoint import PreemptionMonitor, atomic_write_text, atomic_write_via
-from gsm8k_debate.dataset import DEFAULT_AIME_DATASET, MathSample
+from gsm8k_debate.config import (
+    DEFAULT_MODEL,
+    create_openai_client,
+    get_openai_base_url,
+)
+from gsm8k_debate.dataset import DEFAULT_GSM8K_DATASET, GSM8KSample
 from gsm8k_debate.debate import (
     DEFAULT_DEBATE_TEMPERATURE,
     DEFAULT_NUM_AGENTS,
@@ -26,8 +30,9 @@ from gsm8k_debate.error_analysis import (
     ERROR_NONE,
     classify_response_error,
 )
+from gsm8k_debate.llm import close_client_if_owned
 from gsm8k_debate.parsing import answers_match
-from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL, evaluate_aime_subset
+from gsm8k_debate.single_agent import evaluate_gsm8k_subset
 
 
 def classify_outcome(single_correct: bool, debate_correct: bool) -> str:
@@ -88,10 +93,6 @@ def build_comparison_dataframe(
     round_cols = [f"round_{r}_majority" for r in range(1, num_rounds + 1)]
     expected_cols = [
         "index",
-        "unique_id",
-        "year",
-        "part",
-        "problem_number",
         "ground_truth",
         "single_boxed",
         "single_predicted",
@@ -111,9 +112,6 @@ def build_comparison_dataframe(
         return pd.DataFrame(columns=expected_cols)
 
     single_cols = ["index", "ground_truth", "boxed_raw", "predicted", "is_correct"]
-    for meta_col in ("unique_id", "year", "part", "problem_number"):
-        if meta_col in single_df.columns:
-            single_cols.append(meta_col)
     if "raw_response" in single_df.columns:
         single_cols.append("raw_response")
     if "error" in single_df.columns:
@@ -147,15 +145,6 @@ def build_comparison_dataframe(
 
     debate_by_index = {res.index: res for res in debate_results} if debate_results else {}
 
-    for meta_col in ("unique_id", "year", "part", "problem_number"):
-        if meta_col not in merged.columns:
-            merged[meta_col] = [
-                getattr(debate_by_index[int(idx)], meta_col)
-                if int(idx) in debate_by_index
-                else None
-                for idx in merged["index"]
-            ]
-
     single_error_types: list[str] = []
     single_error_details: list[str | None] = []
     for row in merged.itertuples(index=False):
@@ -163,7 +152,7 @@ def build_comparison_dataframe(
         err_val = getattr(row, "error", None)
         err_msg = str(err_val) if pd.notna(err_val) and err_val is not None else None
         pred_raw = row.single_predicted
-        pred_val = str(pred_raw) if pd.notna(pred_raw) and pred_raw is not None else None
+        pred_val = pred_raw if pd.notna(pred_raw) and pred_raw is not None else None
         cls = classify_response_error(
             is_correct=bool(row.single_correct),
             response_text=raw_resp,
@@ -181,7 +170,7 @@ def build_comparison_dataframe(
             d_type, d_detail = _classify_debate_sample_error(res_obj)
         else:
             cons_raw = row.debate_consensus
-            cons_val = str(cons_raw) if pd.notna(cons_raw) and cons_raw is not None else None
+            cons_val = cons_raw if pd.notna(cons_raw) and cons_raw is not None else None
             cls = classify_response_error(
                 is_correct=bool(row.debate_correct),
                 response_text="",
@@ -202,56 +191,20 @@ def build_comparison_dataframe(
     return merged[expected_cols]
 
 
-def _difficulty_tier(problem_number: object) -> str | None:
-    if problem_number is None or pd.isna(problem_number):
-        return None
-    num = int(problem_number)
-    if num <= 5:
-        return "Problems 01-05"
-    if num <= 10:
-        return "Problems 06-10"
-    return "Problems 11-15"
-
-
-def _build_group_breakdown(
-    comparison_df: pd.DataFrame,
-    group_series: pd.Series,
-    *,
-    as_int_label: bool = False,
-) -> dict[str, dict[str, float | int]]:
-    valid_mask = group_series.notna()
-    if not valid_mask.any():
-        return {}
-
-    breakdown: dict[str, dict[str, float | int]] = {}
-    valid_df = comparison_df.loc[valid_mask].copy()
-    valid_df["_group_key"] = group_series.loc[valid_mask]
-    for key, group in valid_df.groupby("_group_key", sort=True):
-        s_acc = float(group["single_correct"].mean())
-        d_acc = float(group["debate_correct"].mean())
-        label = str(int(key)) if as_int_label and isinstance(key, (int, float)) else str(key)
-        breakdown[label] = {
-            "count": len(group),
-            "single_accuracy": round(s_acc, 4),
-            "debate_accuracy": round(d_acc, 4),
-            "accuracy_delta": round(d_acc - s_acc, 4),
-        }
-    return breakdown
-
-
 def summarize_benchmark(
     comparison_df: pd.DataFrame,
     single_metrics: dict[str, Any],
     debate_metrics: dict[str, Any],
     *,
-    dataset_name: str = DEFAULT_AIME_DATASET,
+    dataset_name: str = DEFAULT_GSM8K_DATASET,
+    base_url: str | None = None,
     num_agents: int = DEFAULT_NUM_AGENTS,
     num_rounds: int = DEFAULT_NUM_ROUNDS,
     single_duration_seconds: float = 0.0,
     debate_duration_seconds: float = 0.0,
     total_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Compute aggregate Single-Agent vs. Debate metrics, error types, and AIME breakdowns."""
+    """Compute aggregate Single-Agent vs. Debate accuracy, error types, and timing metrics."""
     compared_count = len(comparison_df)
     outcome_counts = (
         comparison_df["outcome"].value_counts().to_dict() if compared_count else {}
@@ -293,7 +246,8 @@ def summarize_benchmark(
 
     summary: dict[str, Any] = {
         "dataset": dataset_name,
-        "model": debate_metrics.get("model", single_metrics.get("model", DEFAULT_FLASH_MODEL)),
+        "base_url": base_url or get_openai_base_url(),
+        "model": debate_metrics.get("model", single_metrics.get("model", DEFAULT_MODEL)),
         "num_agents": num_agents,
         "num_rounds": num_rounds,
         "requested_samples": int(single_metrics.get("requested", compared_count)),
@@ -324,28 +278,17 @@ def summarize_benchmark(
         key = f"round_{round_num}_accuracy"
         summary[key] = float(debate_metrics.get(key, 0.0))
 
-    if not comparison_df.empty and "year" in comparison_df.columns:
-        year_breakdown = _build_group_breakdown(
-            comparison_df, comparison_df["year"], as_int_label=True
-        )
-        if year_breakdown:
-            summary["year_breakdown"] = year_breakdown
-
-    if not comparison_df.empty and "problem_number" in comparison_df.columns:
-        tier_series = comparison_df["problem_number"].map(_difficulty_tier)
-        tier_breakdown = _build_group_breakdown(comparison_df, tier_series)
-        if tier_breakdown:
-            summary["difficulty_tier_breakdown"] = tier_breakdown
-
     return summary
 
 
 async def run_benchmark_comparison(
-    samples: Sequence[MathSample],
+    samples: Sequence[GSM8KSample],
     *,
-    client: genai.Client | None = None,
-    dataset_name: str = DEFAULT_AIME_DATASET,
-    model: str = DEFAULT_FLASH_MODEL,
+    client: Any = None,
+    dataset_name: str = DEFAULT_GSM8K_DATASET,
+    model: str = DEFAULT_MODEL,
+    base_url: str | None = None,
+    api_key: str | None = None,
     num_agents: int = DEFAULT_NUM_AGENTS,
     num_rounds: int = DEFAULT_NUM_ROUNDS,
     single_temperature: float = 0.0,
@@ -367,81 +310,97 @@ async def run_benchmark_comparison(
 ]:
     """Run Single-Agent and Multi-Agent Debate on the same samples and compare metrics."""
     overall_start = time.perf_counter()
-
-    single_start = time.perf_counter()
-    single_df, single_metrics = await evaluate_aime_subset(
-        samples,
-        client=client,
-        model=model,
-        max_concurrency=max_concurrency,
-        requests_per_minute=requests_per_minute,
-        temperature=single_temperature,
-        max_retries=max_retries,
-        retry_base_delay=retry_base_delay,
-        checkpoint_path=single_checkpoint_path,
-        resume=resume,
-        preemption=preemption,
+    resolved_base_url = get_openai_base_url(base_url=base_url)
+    owns_client = client is None
+    active_client = (
+        client
+        if client is not None
+        else create_openai_client(base_url=resolved_base_url, api_key=api_key)
     )
-    single_duration = time.perf_counter() - single_start
 
-    if single_metrics["interrupted"]:
-        empty_debate_df = pd.DataFrame()
+    try:
+        single_start = time.perf_counter()
+        single_df, single_metrics = await evaluate_gsm8k_subset(
+            samples,
+            client=active_client,
+            model=model,
+            base_url=resolved_base_url,
+            api_key=api_key,
+            max_concurrency=max_concurrency,
+            requests_per_minute=requests_per_minute,
+            temperature=single_temperature,
+            max_retries=max_retries,
+            retry_base_delay=retry_base_delay,
+            checkpoint_path=single_checkpoint_path,
+            resume=resume,
+            preemption=preemption,
+        )
+        single_duration = time.perf_counter() - single_start
+
+        if single_metrics["interrupted"]:
+            empty_debate_df = pd.DataFrame()
+            total_duration = time.perf_counter() - overall_start
+            summary = summarize_benchmark(
+                pd.DataFrame(),
+                single_metrics,
+                {
+                    "model": model,
+                    "total": 0,
+                    "accuracy": 0.0,
+                    "interrupted": True,
+                },
+                dataset_name=dataset_name,
+                base_url=resolved_base_url,
+                num_agents=num_agents,
+                num_rounds=num_rounds,
+                single_duration_seconds=single_duration,
+                debate_duration_seconds=0.0,
+                total_duration_seconds=total_duration,
+            )
+            return pd.DataFrame(), summary, [], single_df, empty_debate_df
+
+        debate_start = time.perf_counter()
+        debate_results, debate_df, debate_metrics = await evaluate_debate_subset(
+            samples,
+            client=active_client,
+            model=model,
+            base_url=resolved_base_url,
+            api_key=api_key,
+            num_agents=num_agents,
+            num_rounds=num_rounds,
+            temperature=debate_temperature,
+            max_concurrency=max_concurrency,
+            requests_per_minute=requests_per_minute,
+            max_retries=max_retries,
+            retry_base_delay=retry_base_delay,
+            checkpoint_path=debate_checkpoint_path,
+            resume=resume,
+            preemption=preemption,
+        )
+        debate_duration = time.perf_counter() - debate_start
         total_duration = time.perf_counter() - overall_start
+
+        comparison_df = build_comparison_dataframe(
+            single_df,
+            debate_df,
+            num_rounds=num_rounds,
+            debate_results=debate_results,
+        )
         summary = summarize_benchmark(
-            pd.DataFrame(),
+            comparison_df,
             single_metrics,
-            {
-                "model": model,
-                "total": 0,
-                "accuracy": 0.0,
-                "interrupted": True,
-            },
+            debate_metrics,
             dataset_name=dataset_name,
+            base_url=resolved_base_url,
             num_agents=num_agents,
             num_rounds=num_rounds,
             single_duration_seconds=single_duration,
-            debate_duration_seconds=0.0,
+            debate_duration_seconds=debate_duration,
             total_duration_seconds=total_duration,
         )
-        return pd.DataFrame(), summary, [], single_df, empty_debate_df
-
-    debate_start = time.perf_counter()
-    debate_results, debate_df, debate_metrics = await evaluate_debate_subset(
-        samples,
-        client=client,
-        model=model,
-        num_agents=num_agents,
-        num_rounds=num_rounds,
-        temperature=debate_temperature,
-        max_concurrency=max_concurrency,
-        requests_per_minute=requests_per_minute,
-        max_retries=max_retries,
-        retry_base_delay=retry_base_delay,
-        checkpoint_path=debate_checkpoint_path,
-        resume=resume,
-        preemption=preemption,
-    )
-    debate_duration = time.perf_counter() - debate_start
-    total_duration = time.perf_counter() - overall_start
-
-    comparison_df = build_comparison_dataframe(
-        single_df,
-        debate_df,
-        num_rounds=num_rounds,
-        debate_results=debate_results,
-    )
-    summary = summarize_benchmark(
-        comparison_df,
-        single_metrics,
-        debate_metrics,
-        dataset_name=dataset_name,
-        num_agents=num_agents,
-        num_rounds=num_rounds,
-        single_duration_seconds=single_duration,
-        debate_duration_seconds=debate_duration,
-        total_duration_seconds=total_duration,
-    )
-    return comparison_df, summary, debate_results, single_df, debate_df
+        return comparison_df, summary, debate_results, single_df, debate_df
+    finally:
+        await close_client_if_owned(active_client, owns_client=owns_client)
 
 
 def save_benchmark_outputs(

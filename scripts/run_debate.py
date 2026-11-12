@@ -1,4 +1,4 @@
-"""Run multi-agent Gemini Flash debate on a subset of Hugging Face AIME."""
+"""Run multi-agent debate on a subset of GSM8K via Ollama / OpenAI-compatible endpoint."""
 
 from __future__ import annotations
 
@@ -9,12 +9,18 @@ import sys
 from pathlib import Path
 
 from gsm8k_debate.checkpoint import PreemptionMonitor, atomic_write_via
+from gsm8k_debate.config import (
+    DEFAULT_MODEL,
+    DEFAULT_OLLAMA_API_KEY,
+    DEFAULT_OLLAMA_BASE_URL,
+    get_openai_api_key,
+    get_openai_base_url,
+)
 from gsm8k_debate.dataset import (
-    DEFAULT_AIME_DATASET,
-    DEFAULT_AIME_SPLIT,
-    DEFAULT_MAX_PROBLEM,
-    DEFAULT_MIN_PROBLEM,
-    load_aime_subset,
+    DEFAULT_GSM8K_CONFIG,
+    DEFAULT_GSM8K_DATASET,
+    DEFAULT_GSM8K_SPLIT,
+    load_gsm8k_subset,
 )
 from gsm8k_debate.debate import (
     DEFAULT_DEBATE_TEMPERATURE,
@@ -24,57 +30,35 @@ from gsm8k_debate.debate import (
     format_debate_trace,
     save_debate_logs,
 )
-from gsm8k_debate.single_agent import DEFAULT_FLASH_MODEL
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run multi-agent debate (Du et al.) on a Hugging Face AIME subset."
+        description="Run multi-agent debate (Du et al.) on a GSM8K test subset."
     )
     parser.add_argument(
         "--dataset",
         type=str,
-        default=DEFAULT_AIME_DATASET,
-        help=(
-            f"Hugging Face AIME dataset ID (default: {DEFAULT_AIME_DATASET}; "
-            "also supports di-zhang-fdu/AIME_1983_2024 or HuggingFaceH4/aime_2024)."
-        ),
+        default=DEFAULT_GSM8K_DATASET,
+        help=f"Hugging Face GSM8K dataset ID (default: {DEFAULT_GSM8K_DATASET}).",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=DEFAULT_GSM8K_CONFIG,
+        help=f"Dataset configuration name (default: {DEFAULT_GSM8K_CONFIG}).",
     )
     parser.add_argument(
         "--split",
         type=str,
-        default=DEFAULT_AIME_SPLIT,
-        help=f"Dataset split name (default: {DEFAULT_AIME_SPLIT}).",
+        default=DEFAULT_GSM8K_SPLIT,
+        help=f"Dataset split name (default: {DEFAULT_GSM8K_SPLIT}).",
     )
     parser.add_argument(
         "--num-samples",
         type=int,
         default=5,
-        help="Number of hard AIME problems (11-15) to evaluate (default: 5).",
-    )
-    parser.add_argument(
-        "--year",
-        type=int,
-        default=None,
-        help="Optional AIME competition year filter (e.g., 2024).",
-    )
-    parser.add_argument(
-        "--min-problem",
-        type=int,
-        default=DEFAULT_MIN_PROBLEM,
-        help=(
-            f"Minimum AIME problem number filter (1-15, default: {DEFAULT_MIN_PROBLEM} "
-            "for the hardest problems 11-15 per year)."
-        ),
-    )
-    parser.add_argument(
-        "--max-problem",
-        type=int,
-        default=DEFAULT_MAX_PROBLEM,
-        help=(
-            f"Maximum AIME problem number filter (1-15, default: {DEFAULT_MAX_PROBLEM} "
-            "for the hardest problems 11-15 per year)."
-        ),
+        help="Number of GSM8K test samples to evaluate (default: 5).",
     )
     parser.add_argument(
         "--num-agents",
@@ -94,8 +78,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default=DEFAULT_FLASH_MODEL,
-        help=f"Gemini Flash model name (default: {DEFAULT_FLASH_MODEL}).",
+        default=DEFAULT_MODEL,
+        help=f"Model name at --base-url (default: {DEFAULT_MODEL}).",
+    )
+    parser.add_argument(
+        "--base-url",
+        type=str,
+        default=None,
+        help=(
+            f"OpenAI-compatible base URL (default: {DEFAULT_OLLAMA_BASE_URL}; "
+            "overridable via OLLAMA_BASE_URL or OPENAI_BASE_URL)."
+        ),
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help=(
+            f"OpenAI-compatible API key string (default: {DEFAULT_OLLAMA_API_KEY!r}; "
+            "overridable via OLLAMA_API_KEY or OPENAI_API_KEY)."
+        ),
     )
     parser.add_argument(
         "--temperature",
@@ -107,7 +109,7 @@ def parse_args() -> argparse.Namespace:
         "--max-concurrency",
         type=int,
         default=3,
-        help="Maximum concurrent Gemini API requests (default: 3).",
+        help="Maximum concurrent API requests (default: 3).",
     )
     parser.add_argument(
         "--rpm",
@@ -124,7 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--shuffle",
         action="store_true",
-        help="Shuffle the filtered split before slicing num-samples.",
+        help="Shuffle the split before slicing num-samples.",
     )
     parser.add_argument(
         "--seed",
@@ -135,11 +137,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-file",
         type=Path,
-        default=Path("logs/aime/debate_checkpoint.jsonl"),
-        help=(
-            "Incremental round-level JSONL checkpoint path "
-            "(default: logs/aime/debate_checkpoint.jsonl)."
-        ),
+        default=Path("logs/debate_checkpoint.jsonl"),
+        help="Incremental round-level JSONL checkpoint path (default: logs/debate_checkpoint.jsonl).",
     )
     parser.add_argument(
         "--resume",
@@ -149,11 +148,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-file",
         type=Path,
-        default=Path("logs/aime/debate_logs.json"),
-        help=(
-            "Path to save intermediate round-by-round JSON logs "
-            "(default: logs/aime/debate_logs.json)."
-        ),
+        default=Path("logs/debate_logs.json"),
+        help="Path to save intermediate round-by-round JSON logs (default: logs/debate_logs.json).",
     )
     parser.add_argument(
         "--show-logs",
@@ -177,32 +173,34 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     )
 
     print(
-        f"Loading up to {args.num_samples} samples (problems {args.min_problem}-{args.max_problem}) "
-        f"from {args.dataset} ({args.split})..."
+        f"Loading {args.num_samples} GSM8K samples from {args.dataset} "
+        f"({args.config}, {args.split})..."
     )
-    samples = load_aime_subset(
+    samples = load_gsm8k_subset(
         num_samples=args.num_samples,
         dataset_name=args.dataset,
+        config_name=args.config,
         split=args.split,
         shuffle=args.shuffle,
         seed=args.seed,
-        year=args.year,
-        min_problem=args.min_problem,
-        max_problem=args.max_problem,
     )
 
+    base_url = get_openai_base_url(base_url=args.base_url)
+    api_key = get_openai_api_key(api_key=args.api_key)
     total_calls = len(samples) * args.num_agents * args.num_rounds
     rpm_note = f", rpm={args.rpm}" if args.rpm is not None else ""
     resume_note = f", resume={args.resume}" if args.resume else ""
     print(
         f"Running {args.num_agents}-agent, {args.num_rounds}-round debate on {len(samples)} "
-        f"AIME samples (~{total_calls} max API calls, model={args.model}, "
-        f"max_concurrency={args.max_concurrency}{rpm_note}{resume_note})..."
+        f"GSM8K samples (~{total_calls} max API calls, model={args.model}, "
+        f"base_url={base_url}, max_concurrency={args.max_concurrency}{rpm_note}{resume_note})..."
     )
 
     results, df, metrics = await evaluate_debate_subset(
         samples,
         model=args.model,
+        base_url=base_url,
+        api_key=api_key,
         num_agents=args.num_agents,
         num_rounds=args.num_rounds,
         temperature=args.temperature,
@@ -228,7 +226,7 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
         print(df.to_string(index=False))
 
     print("\n=== Debate Metrics ===")
-    print(f"Dataset:                  {args.dataset}")
+    print(f"Dataset:                  {args.dataset} ({args.config}/{args.split})")
     print(f"Model:                    {metrics['model']}")
     print(f"Agents x Rounds:          {metrics['num_agents']} x {metrics['num_rounds']}")
     print(f"Samples:                  {metrics['total']} / {metrics['requested']}")

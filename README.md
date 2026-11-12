@@ -1,6 +1,6 @@
-# math-debate (AIME Olympiad Benchmark)
+# gsm8k-debate
 
-Async multi-agent debate benchmark on Hugging Face AIME datasets (default: `AI-MO/aimo-validation-aime`, filtered to the hardest problems `11`–`15` per contest/year; also supports `di-zhang-fdu/AIME_1983_2024` and `HuggingFaceH4/aime_2024`) using Python 3.10+, 3-digit integer answer normalization (`000`–`999`), and the `google-genai` SDK.
+Async multi-agent debate benchmark on GSM8K (`openai/gsm8k`, `"main"` configuration, `"test"` split) using Python 3.10+, numerical `Decimal` extraction (`\boxed{...}` / `#### <num>`), and local Ollama (`http://localhost:11434/v1`, `qwen2.5:7b`) via the OpenAI Python SDK (`openai.AsyncOpenAI`).
 
 ## Setup
 
@@ -14,35 +14,28 @@ In PowerShell from inside `gsm8k-debate/`:
 
 (If dependencies are not yet installed in a fresh environment, run `pip install -e ".[dev]"` after activating `.venv`. Note that `asyncio` is part of the Python standard library and does not need to be installed separately.)
 
-### 2. Configure your Gemini API key
+### 2. Configure local Ollama endpoint
 
-Never hardcode API credentials in source files or commit them to Git. Set `GEMINI_API_KEY` via one of the following methods:
+By default, all scripts connect via `AsyncOpenAI` to your local Ollama OpenAI-compatible server:
 
-**Option A: Local `.env` file (recommended for repo-scoped development)**
+- **Base URL**: `http://localhost:11434/v1` (override via `--base-url` or `OLLAMA_BASE_URL`)
+- **API Key**: `"ollama"` (override via `--api-key` or `OLLAMA_API_KEY`)
+- **Model**: `"qwen2.5:7b"` (override via `--model`)
 
-```powershell
-Copy-Item .env.example .env
-# Edit .env and replace your_gemini_api_key_here with your actual key
-```
-
-**Option B: PowerShell session environment variable**
+Ensure Ollama is running locally with `qwen2.5:7b` pulled:
 
 ```powershell
-$env:GEMINI_API_KEY = "your-actual-api-key"
+ollama pull qwen2.5:7b
 ```
 
-**Option C: Persistent Windows user environment variable**
-
-```powershell
-setx GEMINI_API_KEY "your-actual-api-key"
-```
+You can also set `OLLAMA_BASE_URL` / `OLLAMA_API_KEY` in a local `.env` file (see `.env.example`) or pass `--base-url`, `--api-key`, and `--model` directly to any script.
 
 ### 3. Verify installation
 
 With `.venv` activated:
 
 ```powershell
-python -c "import google.genai, sympy; print('Ready')"
+python -c "import openai, datasets, pandas; print('Ready')"
 ```
 
 Run the test suite:
@@ -51,39 +44,31 @@ Run the test suite:
 pytest
 ```
 
-### 4. Run single-agent AIME baseline
+### 4. Run single-agent GSM8K baseline
 
-By default, all evaluation scripts filter to **only the hardest AIME problems (`11`–`15` per contest/year)** — 30 problems across 2022–2024 AIME I & II in `AI-MO/aimo-validation-aime` (10 per year), or 310 historical problems in `di-zhang-fdu/AIME_1983_2024`.
-
-Evaluate Gemini Flash on 15 hard AIME problems (`11`–`15`) from `AI-MO/aimo-validation-aime`:
+Evaluate `qwen2.5:7b` on a subset of the `openai/gsm8k` test split (default: 15 samples):
 
 ```powershell
 python scripts/run_single_agent.py --num-samples 15
 ```
 
-You can also filter by competition year (e.g., all 10 problems `11`–`15` in 2024 AIME I & II), override the problem range (`--min-problem 1 --max-problem 15`), or switch datasets (e.g., `di-zhang-fdu/AIME_1983_2024`):
-
-```powershell
-python scripts/run_single_agent.py --year 2024 --num-samples 10
-```
-
 ### 5. Run multi-agent debate (Du et al.)
 
-Run the 3-agent async debate loop on hard AIME problems (`11`–`15`; Round 1 independent Olympiad proof + Rounds 2 & 3 peer-debate rounds) and inspect the intermediate logs (`logs/aime/debate_logs.json`):
+Run the 3-agent, 3-round asynchronous debate loop (`Round 1` independent solution + `Rounds 2 & 3` peer-debate rounds) and inspect intermediate logs (`logs/debate_logs.json`):
 
 ```powershell
 python scripts/run_debate.py --num-samples 5 --show-logs 2
 ```
 
-For Free Tier quotas (`--rpm 4`), start with 1–3 samples (3 agents × 3 turns = 9 API calls per sample):
+If running on limited local GPU VRAM/slots, reduce concurrency with `--max-concurrency 1`:
 
 ```powershell
-python scripts/run_debate.py --num-samples 2 --rpm 4 --show-logs 2
+python scripts/run_debate.py --num-samples 2 --max-concurrency 1 --show-logs 2
 ```
 
 ### 6. Preemption & Resume Support
 
-Both `run_single_agent.py` and `run_debate.py` flush incremental JSONL checkpoints (`logs/aime/single_agent_checkpoint.jsonl` and round-level `logs/aime/debate_checkpoint.jsonl`) and handle `SIGINT`/`SIGTERM` gracefully. If interrupted mid-run, resume without repeating completed rounds or samples:
+Both `run_single_agent.py` and `run_debate.py` flush incremental JSONL checkpoints (`logs/single_agent_checkpoint.jsonl` and round-level `logs/debate_checkpoint.jsonl`) and handle `SIGINT`/`SIGTERM` gracefully. If interrupted mid-run, resume without repeating completed rounds or samples:
 
 ```powershell
 python scripts/run_debate.py --num-samples 5 --resume
@@ -91,28 +76,28 @@ python scripts/run_debate.py --num-samples 5 --resume
 
 ### 7. Inspect intermediate round logs
 
-Inspect `logs/aime/debate_logs.json` (completed runs) or `logs/aime/debate_checkpoint.jsonl` (in-progress or preempted runs) to see every round's peer inputs (`--show-prompts`), proof critiques, and answer changes:
+Inspect `logs/debate_logs.json` (completed runs) or `logs/debate_checkpoint.jsonl` (in-progress or preempted runs) to see every round's peer inputs (`--show-prompts`), critiques, and answer changes:
 
 ```powershell
-python scripts/inspect_logs.py --log-file logs/aime/debate_logs.json --show-prompts
+python scripts/inspect_logs.py --log-file logs/debate_logs.json --show-prompts
 ```
 
 ### 8. Side-by-side Single-Agent vs. Debate benchmark
 
-Compare Single-Agent baseline against 3-Agent Multi-Round Debate across all **30** hard AIME problems (`11`–`15` across 2022–2024 in `AI-MO/aimo-validation-aime`; `--resume` reuses checkpoints in `logs/aime`), logging 3-digit `000`–`999` accuracy, answer changes, error types (`arithmetic_slip` vs. `conceptual_logic_error`), year/difficulty-tier breakdowns, and execution time to `results/aime/`:
+Compare Single-Agent baseline against 3-Agent Multi-Round Debate across 100 GSM8K test problems using `qwen2.5:7b` on local Ollama (`http://localhost:11434/v1`), logging accuracy, answer changes, error types (`arithmetic_slip` vs. `conceptual_logic_error`), and execution time to `results/qwen_gsm8k/` (using a separate `--checkpoint-dir` / `--output-dir` isolates runs from earlier models):
 
 ```powershell
-python scripts/run_benchmark.py --num-samples 30 --max-concurrency 15 --resume
+python scripts/run_benchmark.py --num-samples 100 --max-concurrency 3 --checkpoint-dir logs/qwen_gsm8k --output-dir results/qwen_gsm8k
 ```
 
-To benchmark 100 hard historical AIME problems (`11`–`15` across `1983`–`2024`):
+To resume an interrupted run:
 
 ```powershell
-python scripts/run_benchmark.py --dataset di-zhang-fdu/AIME_1983_2024 --num-samples 100 --shuffle --max-concurrency 15 --resume
+python scripts/run_benchmark.py --num-samples 100 --max-concurrency 3 --checkpoint-dir logs/qwen_gsm8k --output-dir results/qwen_gsm8k --resume
 ```
 
-For Free Tier quotas (e.g., 5 RPM), pass `--rpm 4` so requests are spaced smoothly without `429` bursts:
+To point any script at another OpenAI-compatible server or model, pass `--base-url`, `--api-key`, and `--model` (or set `OLLAMA_BASE_URL` / `OLLAMA_API_KEY`):
 
 ```powershell
-python scripts/run_benchmark.py --num-samples 30 --rpm 4 --resume
+python scripts/run_benchmark.py --base-url http://localhost:11434/v1 --api-key ollama --model qwen2.5:7b --num-samples 100
 ```
