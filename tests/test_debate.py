@@ -1,17 +1,16 @@
-"""Unit tests for the GSM8K multi-agent debate loop, prompt consensus, voting, and logging."""
+"""Unit tests for the MATH-500 multi-agent debate loop, prompt consensus, voting, and logging."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from gsm8k_debate.checkpoint import PreemptionMonitor
-from gsm8k_debate.dataset import GSM8KSample
+from gsm8k_debate.dataset import MathSample
 from gsm8k_debate.debate import (
     DebateAgent,
     build_consensus_prompt,
@@ -25,21 +24,22 @@ from gsm8k_debate.debate import (
 
 
 def test_build_round1_and_consensus_prompts() -> None:
-    q = "Alice has 3 apples and buys 2 more. How many apples does she have?"
+    q = "Find all real $x$ such that $x^2 - 5x + 6 = 0$."
     r1 = build_round1_prompt(q)
     assert q in r1
+    assert "AMC/AIME" in r1
     assert r"\boxed{answer}" in r1
 
     consensus = build_consensus_prompt(
         q,
         peer_responses=[
-            (2, r"Alice starts with 3 and adds 2, so 3+2=5. \boxed{5}"),
-            (3, r"3 + 2 = 5 apples. \boxed{5}"),
+            (2, r"Factoring gives $(x-2)(x-3)=0$. \boxed{2, 3}"),
+            (3, r"By quadratic formula, roots are \boxed{2, 3}"),
         ],
     )
     assert "One agent solution (Agent 2):" in consensus
     assert "One agent solution (Agent 3):" in consensus
-    assert "3+2=5" in consensus
+    assert "proofs" in consensus.lower()
     assert q in consensus
 
 
@@ -59,14 +59,22 @@ def test_debate_agent_maintains_isolated_history() -> None:
     assert next_contents[2].parts[0].text == "Round 2 peer feedback"
 
 
-def test_compute_majority_vote() -> None:
-    winner, votes, had_tie = compute_majority_vote([Decimal(42), Decimal("42.0"), Decimal(10)])
-    assert winner == Decimal(42)
-    assert votes == {"42": 2, "10": 1}
+def test_compute_majority_vote_clusters_symbolic_equivalences() -> None:
+    winner, votes, had_tie = compute_majority_vote([r"\frac{1}{2}", "0.5", r"\frac{3}{4}"])
+    assert winner == "0.5"
+    assert votes == {"0.5": 2, r"\frac{3}{4}": 1}
     assert not had_tie
 
-    winner_tie, _, is_tie = compute_majority_vote([Decimal(1), Decimal(2), Decimal(3)])
-    assert winner_tie == Decimal(1)
+    winner_sym, votes_sym, tie_sym = compute_majority_vote(
+        [r"\frac{1}{\sqrt{2}}", r"\frac{\sqrt{2}}{2}", "1"]
+    )
+    assert winner_sym in {r"\frac{1}{\sqrt{2}}", r"\frac{\sqrt{2}}{2}"}
+    assert sum(votes_sym.values()) == 3
+    assert max(votes_sym.values()) == 2
+    assert not tie_sym
+
+    winner_tie, _, is_tie = compute_majority_vote(["1", "2", "3"])
+    assert winner_tie == "1"
     assert is_tie
 
     none_winner, empty_votes, no_tie = compute_majority_vote([None, None])
@@ -98,7 +106,7 @@ class _FakeAsyncModels:
             if call_idx == 1:
                 return SimpleNamespace(text=r"AGENT1_R1: I got 3*4=11. \boxed{11}")
             if call_idx == 2:
-                return SimpleNamespace(text=r"AGENT2_R1: 3*4=12 and 12+2=14. \boxed{14}")
+                return SimpleNamespace(text=r"AGENT2_R1: \frac{28}{2} = 14. \boxed{\frac{28}{2}}")
             return SimpleNamespace(text=r"AGENT3_R1: 3*4=13? Wait \boxed{13}")
 
         own_r1 = contents[1].parts[0].text
@@ -123,7 +131,7 @@ class _FakeAsyncModels:
                 assert "AGENT3_R1" in latest_prompt
                 assert "AGENT2_R1" not in latest_prompt
                 return SimpleNamespace(
-                    text=r"AGENT2_R2: Agent 1 had 3*4=11 by mistake; keeping \boxed{14}"
+                    text=r"AGENT2_R2: Simplified \frac{28}{2}; keeping \boxed{14}"
                 )
             assert "AGENT1_R2" in latest_prompt
             assert "AGENT3_R2_OR_R3" in latest_prompt
@@ -142,11 +150,13 @@ class _FakeAsyncModels:
 
 
 def test_run_debate_for_sample_rounds_and_logging(tmp_path: Path) -> None:
-    sample = GSM8KSample(
+    sample = MathSample(
         index=0,
-        question="What is 3 * 4 + 2?",
-        raw_answer="#### 14",
-        ground_truth=Decimal(14),
+        question="Compute $3 \\cdot 4 + 2$.",
+        raw_answer=r"\boxed{14}",
+        ground_truth="14",
+        subject="Prealgebra",
+        level=1,
     )
     fake_client = SimpleNamespace(aio=SimpleNamespace(models=_FakeAsyncModels()))
 
@@ -161,11 +171,12 @@ def test_run_debate_for_sample_rounds_and_logging(tmp_path: Path) -> None:
     )
 
     assert len(result.round_logs) == 9
-    assert result.round_majority_answers[1] == Decimal(11)
-    assert result.round_majority_answers[2] == Decimal(14)
-    assert result.round_majority_answers[3] == Decimal(14)
-    assert result.consensus_answer == Decimal(14)
+    assert result.round_majority_answers[1] == "11"
+    assert result.round_majority_answers[2] == "14"
+    assert result.round_majority_answers[3] == "14"
+    assert result.consensus_answer == "14"
     assert result.is_correct is True
+    # Agent 1 (11->14) and Agent 3 (13->14) changed; Agent 2 (\frac{28}{2}->14) stayed equivalent!
     assert result.answer_changes == 2
 
     r2_agent1 = next(
@@ -179,10 +190,12 @@ def test_run_debate_for_sample_rounds_and_logging(tmp_path: Path) -> None:
     assert r2_agent1.changed_from_prev_round is True
     assert r2_agent2.peer_agent_ids == [1, 3]
     assert "AGENT1_R1" in r2_agent2.prompt_sent
+    assert r2_agent2.changed_from_prev_round is False
 
     log_path = save_debate_logs([result], tmp_path / "debate_logs.json")
     loaded = json.loads(log_path.read_text(encoding="utf-8"))
     assert len(loaded) == 1
+    assert loaded[0]["subject"] == "Prealgebra"
     assert len(loaded[0]["round_logs"]) == 9
 
     trace = format_debate_trace(result)
@@ -194,11 +207,11 @@ def test_run_debate_for_sample_rounds_and_logging(tmp_path: Path) -> None:
 
 def test_evaluate_debate_subset_metrics() -> None:
     samples = [
-        GSM8KSample(
+        MathSample(
             index=0,
-            question="What is 3 * 4 + 2?",
-            raw_answer="#### 14",
-            ground_truth=Decimal(14),
+            question="Compute $3 \\cdot 4 + 2$.",
+            raw_answer=r"\boxed{14}",
+            ground_truth="14",
         )
     ]
     fake_client = SimpleNamespace(aio=SimpleNamespace(models=_FakeAsyncModels()))
@@ -225,11 +238,11 @@ def test_evaluate_debate_subset_metrics() -> None:
 
 def test_evaluate_debate_subset_preemption_and_resume(tmp_path: Path) -> None:
     samples = [
-        GSM8KSample(
+        MathSample(
             index=0,
-            question="What is 3 * 4 + 2?",
-            raw_answer="#### 14",
-            ground_truth=Decimal(14),
+            question="Compute $3 \\cdot 4 + 2$.",
+            raw_answer=r"\boxed{14}",
+            ground_truth="14",
         )
     ]
     ckpt = tmp_path / "debate_checkpoint.jsonl"
@@ -288,11 +301,11 @@ def test_evaluate_debate_subset_preemption_and_resume(tmp_path: Path) -> None:
 
 
 def test_run_debate_for_sample_with_openai_client() -> None:
-    sample = GSM8KSample(
+    sample = MathSample(
         index=0,
-        question="What is 6 * 7?",
-        raw_answer="#### 42",
-        ground_truth=Decimal(42),
+        question=r"Rationalize $\frac{1}{\sqrt{2}}$.",
+        raw_answer=r"\boxed{\frac{\sqrt{2}}{2}}",
+        ground_truth=r"\frac{\sqrt{2}}{2}",
     )
     seen_roles: list[list[str]] = []
 
@@ -303,13 +316,14 @@ def test_run_debate_for_sample_with_openai_client() -> None:
         round_num = len(messages) // 2
         if round_num == 1 and len(seen_roles) == 1:
             return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content=r"R1 slip \boxed{41}"))]
+                choices=[SimpleNamespace(message=SimpleNamespace(content=r"R1 slip \boxed{2}"))]
             )
         return SimpleNamespace(
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(
-                        content="<think>Check 6 * 7 = 42.</think>\n" + r"Answer: \boxed{42}"
+                        content="<think>Multiply top and bottom by sqrt(2).</think>\n"
+                        + r"Answer: \boxed{\frac{\sqrt{2}}{2}}"
                     )
                 )
             ]
@@ -326,7 +340,7 @@ def test_run_debate_for_sample_with_openai_client() -> None:
             num_rounds=2,
         )
     )
-    assert result.consensus_answer == Decimal(42)
+    assert result.consensus_answer == r"\frac{\sqrt{2}}{2}"
     assert result.is_correct is True
     assert result.answer_changes == 1
     assert any(roles == ["system", "user", "assistant", "user"] for roles in seen_roles)

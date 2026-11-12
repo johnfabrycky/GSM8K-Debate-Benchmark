@@ -1,4 +1,4 @@
-"""Run single-agent GSM8K evaluation via Ollama / OpenAI-compatible endpoint."""
+"""Run single-agent MATH-500 evaluation via Ollama / OpenAI-compatible endpoint."""
 
 from __future__ import annotations
 
@@ -16,41 +16,46 @@ from gsm8k_debate.config import (
     get_openai_base_url,
 )
 from gsm8k_debate.dataset import (
-    DEFAULT_GSM8K_CONFIG,
-    DEFAULT_GSM8K_DATASET,
-    DEFAULT_GSM8K_SPLIT,
-    load_gsm8k_subset,
+    DEFAULT_MATH500_DATASET,
+    DEFAULT_MATH500_SPLIT,
+    load_math500_subset,
 )
-from gsm8k_debate.single_agent import evaluate_gsm8k_subset
+from gsm8k_debate.single_agent import evaluate_math_subset
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate a single agent on a Hugging Face GSM8K subset."
+        description="Evaluate a single agent on a HuggingFaceH4/MATH-500 subset."
     )
     parser.add_argument(
         "--dataset",
         type=str,
-        default=DEFAULT_GSM8K_DATASET,
-        help=f"Hugging Face GSM8K dataset ID (default: {DEFAULT_GSM8K_DATASET}).",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=DEFAULT_GSM8K_CONFIG,
-        help=f"Dataset configuration name (default: {DEFAULT_GSM8K_CONFIG}).",
+        default=DEFAULT_MATH500_DATASET,
+        help=f"Hugging Face MATH-500 dataset ID (default: {DEFAULT_MATH500_DATASET}).",
     )
     parser.add_argument(
         "--split",
         type=str,
-        default=DEFAULT_GSM8K_SPLIT,
-        help=f"Dataset split name (default: {DEFAULT_GSM8K_SPLIT}).",
+        default=DEFAULT_MATH500_SPLIT,
+        help=f"Dataset split name (default: {DEFAULT_MATH500_SPLIT}).",
     )
     parser.add_argument(
         "--num-samples",
         type=int,
         default=15,
-        help="Number of GSM8K test samples to evaluate (default: 15).",
+        help="Number of MATH-500 test samples to evaluate (default: 15).",
+    )
+    parser.add_argument(
+        "--subject",
+        type=str,
+        default=None,
+        help="Optional MATH-500 subject filter (e.g., Algebra, Number Theory, Precalculus).",
+    )
+    parser.add_argument(
+        "--level",
+        type=int,
+        default=None,
+        help="Optional MATH-500 difficulty level filter (1-5).",
     )
     parser.add_argument(
         "--model",
@@ -108,8 +113,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-file",
         type=Path,
-        default=Path("logs/single_agent_checkpoint.jsonl"),
-        help="Incremental JSONL checkpoint path (default: logs/single_agent_checkpoint.jsonl).",
+        default=Path("logs/qwen_math500/single_agent_checkpoint.jsonl"),
+        help=(
+            "Incremental JSONL checkpoint path "
+            "(default: logs/qwen_math500/single_agent_checkpoint.jsonl)."
+        ),
     )
     parser.add_argument(
         "--resume",
@@ -135,17 +143,15 @@ def _truncate(val: object, limit: int = 60) -> str:
 
 
 async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> int:
-    print(
-        f"Loading {args.num_samples} GSM8K samples from {args.dataset} "
-        f"({args.config}, {args.split})..."
-    )
-    samples = load_gsm8k_subset(
+    print(f"Loading {args.num_samples} samples from {args.dataset} ({args.split})...")
+    samples = load_math500_subset(
         num_samples=args.num_samples,
         dataset_name=args.dataset,
-        config_name=args.config,
         split=args.split,
         shuffle=args.shuffle,
         seed=args.seed,
+        subject=args.subject,
+        level=args.level,
     )
 
     base_url = get_openai_base_url(base_url=args.base_url)
@@ -153,10 +159,10 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     rpm_note = f", rpm={args.rpm}" if args.rpm is not None else ""
     resume_note = f", resume={args.resume}" if args.resume else ""
     print(
-        f"Querying {args.model} at {base_url} on {len(samples)} GSM8K samples "
+        f"Querying {args.model} at {base_url} on {len(samples)} MATH-500 samples "
         f"(max_concurrency={args.max_concurrency}{rpm_note}{resume_note})..."
     )
-    df, metrics = await evaluate_gsm8k_subset(
+    df, metrics = await evaluate_math_subset(
         samples,
         model=args.model,
         base_url=base_url,
@@ -170,20 +176,22 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     )
 
     if not df.empty:
-        display_df = df[["index", "ground_truth", "boxed_raw", "predicted", "is_correct"]].copy()
+        display_df = df[
+            ["index", "subject", "level", "ground_truth", "boxed_raw", "predicted", "is_correct"]
+        ].copy()
         display_df["error"] = df["error"].map(_truncate)
         print("\n=== Per-Sample Results ===")
         print(display_df.to_string(index=False))
 
     print("\n=== Accuracy Metrics ===")
-    print(f"Dataset:        {args.dataset} ({args.config}/{args.split})")
+    print(f"Dataset:        {args.dataset} ({args.split})")
     print(f"Model:          {metrics['model']}")
     print(f"Samples:        {metrics['total']} / {metrics['requested']}")
     print(f"Correct:        {metrics['correct']} / {metrics['total']}")
     print(f"Accuracy:       {metrics['accuracy']:.2%}")
     print(f"Boxed Parsed:   {metrics['boxed_parsed']} / {metrics['total']}")
     print(
-        f"Numeric Parsed: {metrics['numeric_parsed']} / {metrics['total']} "
+        f"Parsed Answers: {metrics['parsed_answers']} / {metrics['total']} "
         f"({metrics['parse_rate']:.2%})"
     )
     print(f"API Errors:     {metrics['errors']}")

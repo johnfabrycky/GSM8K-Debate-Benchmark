@@ -1,4 +1,4 @@
-"""gsm8k-debate package initialization (GSM8K multi-agent debate benchmark)."""
+"""gsm8k-debate package initialization (MATH-500 & competition math support)."""
 
 from gsm8k_debate.benchmark import (
     build_comparison_dataframe,
@@ -20,12 +20,12 @@ from gsm8k_debate.config import (
     get_openai_base_url,
 )
 from gsm8k_debate.dataset import (
-    DEFAULT_GSM8K_CONFIG,
-    DEFAULT_GSM8K_DATASET,
-    DEFAULT_GSM8K_SPLIT,
+    DEFAULT_MATH500_DATASET,
+    DEFAULT_MATH500_SPLIT,
     GSM8KSample,
     MathSample,
     load_gsm8k_subset,
+    load_math500_subset,
 )
 from gsm8k_debate.debate import (
     DEFAULT_DEBATE_TEMPERATURE,
@@ -52,6 +52,9 @@ from gsm8k_debate.parsing import (
     extract_boxed_content,
     extract_boxed_number,
     extract_ground_truth_answer,
+    extract_math_answer,
+    normalize_latex_answer,
+    parse_math_answer,
     parse_numeric_answer,
 )
 from gsm8k_debate.single_agent import (
@@ -65,9 +68,8 @@ from gsm8k_debate.single_agent import (
 __all__ = [
     "DEFAULT_DEBATE_TEMPERATURE",
     "DEFAULT_FLASH_MODEL",
-    "DEFAULT_GSM8K_CONFIG",
-    "DEFAULT_GSM8K_DATASET",
-    "DEFAULT_GSM8K_SPLIT",
+    "DEFAULT_MATH500_DATASET",
+    "DEFAULT_MATH500_SPLIT",
     "DEFAULT_MODEL",
     "DEFAULT_NUM_AGENTS",
     "DEFAULT_NUM_ROUNDS",
@@ -98,12 +100,16 @@ __all__ = [
     "extract_boxed_content",
     "extract_boxed_number",
     "extract_ground_truth_answer",
+    "extract_math_answer",
     "find_arithmetic_slips",
     "format_debate_trace",
     "get_gemini_api_key",
     "get_openai_api_key",
     "get_openai_base_url",
     "load_gsm8k_subset",
+    "load_math500_subset",
+    "normalize_latex_answer",
+    "parse_math_answer",
     "parse_numeric_answer",
     "run_benchmark_comparison",
     "run_debate_for_sample",

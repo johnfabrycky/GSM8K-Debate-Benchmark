@@ -1,4 +1,4 @@
-"""Error taxonomy and heuristic arithmetic-vs-logic classification for GSM8K outputs."""
+"""Error taxonomy and heuristic arithmetic-vs-logic classification for math outputs."""
 
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ def classify_response_error(
     *,
     is_correct: bool,
     response_text: str,
-    predicted: Decimal | str | int | None,
+    predicted: str | Decimal | float | None,
     error_message: str | None = None,
 ) -> ErrorClassification:
     """Classify why a model output was incorrect (or return 'none' if correct)."""
@@ -149,5 +149,5 @@ def classify_response_error(
 
     return ErrorClassification(
         error_type=ERROR_CONCEPTUAL_LOGIC,
-        detail="Arithmetic steps valid/unflagged, but problem formulation or logic differs",
+        detail="Arithmetic steps valid/unflagged, but proof, algebra, or logic differs",
     )

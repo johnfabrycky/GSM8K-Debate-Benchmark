@@ -1,8 +1,6 @@
-"""Unit tests for heuristic math error classification on GSM8K outputs."""
+"""Unit tests for heuristic math error classification on MATH-500 outputs."""
 
 from __future__ import annotations
-
-from decimal import Decimal
 
 from gsm8k_debate.error_analysis import (
     ERROR_API,
@@ -54,8 +52,8 @@ def test_classify_response_error_categories() -> None:
     assert (
         classify_response_error(
             is_correct=True,
-            response_text=r"\boxed{18}",
-            predicted=Decimal(18),
+            response_text=r"\boxed{\frac{14}{3}}",
+            predicted=r"\frac{14}{3}",
         ).error_type
         == ERROR_NONE
     )
@@ -80,15 +78,15 @@ def test_classify_response_error_categories() -> None:
         classify_response_error(
             is_correct=False,
             response_text=r"3 \times 4 = 11, plus 2 = 13. \boxed{13}",
-            predicted=Decimal(13),
+            predicted="13",
         ).error_type
         == ERROR_ARITHMETIC_SLIP
     )
     assert (
         classify_response_error(
             is_correct=False,
-            response_text=r"She adds instead of subtracting: 16 + 7 = 23. \boxed{23}",
-            predicted=Decimal(23),
+            response_text=r"By wrong theorem assumption, 2^3 + 1 = 9. \boxed{9}",
+            predicted="9",
         ).error_type
         == ERROR_CONCEPTUAL_LOGIC
     )

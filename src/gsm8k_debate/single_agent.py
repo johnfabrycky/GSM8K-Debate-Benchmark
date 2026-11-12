@@ -1,4 +1,4 @@
-"""Single-agent prompt execution and GSM8K evaluation."""
+"""Single-agent prompt execution and MATH-500 evaluation (Ollama / OpenAI & Gemini)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +18,7 @@ from gsm8k_debate.checkpoint import (
     load_jsonl_records,
 )
 from gsm8k_debate.config import DEFAULT_MODEL, create_openai_client
-from gsm8k_debate.dataset import GSM8KSample
+from gsm8k_debate.dataset import MathSample
 from gsm8k_debate.llm import (
     HANDLED_API_ERRORS,
     AsyncRateLimiter,
@@ -30,7 +29,7 @@ from gsm8k_debate.llm import (
 from gsm8k_debate.parsing import (
     answers_match,
     extract_boxed_content,
-    parse_numeric_answer,
+    parse_math_answer,
 )
 
 DEFAULT_FLASH_MODEL = DEFAULT_MODEL
@@ -38,10 +37,12 @@ DEFAULT_FLASH_MODEL = DEFAULT_MODEL
 logger = logging.getLogger(__name__)
 
 SINGLE_AGENT_SYSTEM_PROMPT = (
-    "You are an expert mathematical problem solver. "
-    "Solve the grade-school math word problem carefully step by step. "
-    "At the very end of your response, put only the final numerical answer inside "
-    r"\boxed{...} (for example, \boxed{42})."
+    "You are an expert mathematician solving high-school competition math problems "
+    "(AMC, AIME, and Olympiad style). Provide a rigorous step-by-step proof and "
+    "algebraic derivation, verifying all edge cases and intermediate calculations. "
+    "Conclude with only your exact simplified final answer inside a single "
+    r"\boxed{...} expression (for example, \boxed{\frac{3}{2}}, \boxed{2\sqrt{5}}, "
+    r"or \boxed{(3, -2)}), with no extra words inside the box unless the answer itself is text."
 )
 
 _extract_retry_delay_seconds = extract_retry_delay_seconds
@@ -49,16 +50,19 @@ _extract_retry_delay_seconds = extract_retry_delay_seconds
 
 @dataclass(frozen=True)
 class SingleAgentResult:
-    """Evaluation outcome for a single GSM8K question."""
+    """Evaluation outcome for a single competition math problem."""
 
     index: int
     question: str
-    ground_truth: Decimal
+    ground_truth: str
     raw_response: str
     boxed_raw: str | None
-    predicted: Decimal | None
+    predicted: str | None
     is_correct: bool
     error: str | None = None
+    subject: str | None = None
+    level: int | None = None
+    unique_id: str | None = None
 
 
 def serialize_single_agent_result(result: SingleAgentResult) -> dict[str, Any]:
@@ -66,29 +70,36 @@ def serialize_single_agent_result(result: SingleAgentResult) -> dict[str, Any]:
     return {
         "index": result.index,
         "question": result.question,
-        "ground_truth": str(result.ground_truth),
+        "ground_truth": result.ground_truth,
         "raw_response": result.raw_response,
         "boxed_raw": result.boxed_raw,
-        "predicted": str(result.predicted) if result.predicted is not None else None,
+        "predicted": result.predicted,
         "is_correct": result.is_correct,
         "error": result.error,
+        "subject": result.subject,
+        "level": result.level,
+        "unique_id": result.unique_id,
     }
 
 
 def deserialize_single_agent_result(payload: dict[str, Any]) -> SingleAgentResult:
     """Reconstruct a SingleAgentResult from a checkpoint dictionary."""
     predicted_raw = payload.get("predicted")
+    level_raw = payload.get("level")
     return SingleAgentResult(
         index=int(payload["index"]),
         question=str(payload["question"]),
-        ground_truth=Decimal(str(payload["ground_truth"])),
+        ground_truth=str(payload["ground_truth"]),
         raw_response=str(payload.get("raw_response", "")),
         boxed_raw=(
             str(payload["boxed_raw"]) if payload.get("boxed_raw") is not None else None
         ),
-        predicted=Decimal(str(predicted_raw)) if predicted_raw is not None else None,
+        predicted=str(predicted_raw) if predicted_raw is not None else None,
         is_correct=bool(payload["is_correct"]),
         error=str(payload["error"]) if payload.get("error") is not None else None,
+        subject=str(payload["subject"]) if payload.get("subject") is not None else None,
+        level=int(level_raw) if level_raw is not None else None,
+        unique_id=str(payload["unique_id"]) if payload.get("unique_id") is not None else None,
     )
 
 
@@ -113,7 +124,7 @@ async def solve_math_question(
     rate_limiter: AsyncRateLimiter | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> str:
-    """Query the configured LLM asynchronously for a single GSM8K question with retries."""
+    """Query the configured LLM asynchronously for a competition math problem with retries."""
     return await generate_content_with_retry(
         client,
         model=model,
@@ -129,7 +140,7 @@ async def solve_math_question(
 
 async def evaluate_sample(
     client: Any,
-    sample: GSM8KSample,
+    sample: MathSample,
     *,
     model: str = DEFAULT_MODEL,
     semaphore: asyncio.Semaphore | None = None,
@@ -139,7 +150,7 @@ async def evaluate_sample(
     retry_base_delay: float = 2.0,
     stop_event: asyncio.Event | None = None,
 ) -> SingleAgentResult:
-    """Run single-agent inference and ``\\boxed{...}`` parsing for one GSM8K sample."""
+    """Run single-agent inference and ``\\boxed{...}`` parsing/equivalence for one sample."""
 
     async def _run() -> str:
         return await solve_math_question(
@@ -173,10 +184,13 @@ async def evaluate_sample(
             predicted=None,
             is_correct=False,
             error=f"{type(exc).__name__}: {exc}",
+            subject=sample.subject,
+            level=sample.level,
+            unique_id=sample.unique_id,
         )
 
     boxed_raw = extract_boxed_content(raw_response)
-    predicted = parse_numeric_answer(boxed_raw) if boxed_raw is not None else None
+    predicted = parse_math_answer(boxed_raw)
     is_correct = answers_match(predicted, sample.ground_truth)
 
     return SingleAgentResult(
@@ -187,11 +201,14 @@ async def evaluate_sample(
         boxed_raw=boxed_raw,
         predicted=predicted,
         is_correct=is_correct,
+        subject=sample.subject,
+        level=sample.level,
+        unique_id=sample.unique_id,
     )
 
 
-async def evaluate_gsm8k_subset(
-    samples: Sequence[GSM8KSample],
+async def evaluate_math_subset(
+    samples: Sequence[MathSample],
     *,
     client: Any = None,
     model: str = DEFAULT_MODEL,
@@ -206,7 +223,7 @@ async def evaluate_gsm8k_subset(
     resume: bool = False,
     preemption: PreemptionMonitor | None = None,
 ) -> tuple[pd.DataFrame, dict[str, float | int | str | bool]]:
-    """Evaluate a GSM8K subset concurrently with optional checkpointing and resume."""
+    """Evaluate a MATH-500 subset concurrently with optional checkpointing and resume."""
     if max_concurrency <= 0:
         raise ValueError(f"max_concurrency must be positive, got {max_concurrency}")
 
@@ -221,8 +238,8 @@ async def evaluate_gsm8k_subset(
                 if prior is not None and prior.question != sample.question:
                     raise ValueError(
                         f"Checkpoint sample {sample.index} does not match current dataset slice. "
-                        "Use the same --dataset/--config/--split/--num-samples/--shuffle/--seed "
-                        "or omit --resume."
+                        "Use the same --dataset/--split/--num-samples/--shuffle/--seed/"
+                        "--subject/--level or omit --resume."
                     )
         elif checkpoint_path.exists():
             checkpoint_path.unlink()
@@ -249,7 +266,7 @@ async def evaluate_gsm8k_subset(
             AsyncRateLimiter(requests_per_minute) if requests_per_minute is not None else None
         )
 
-        async def _eval_and_persist(sample: GSM8KSample) -> SingleAgentResult | None:
+        async def _eval_and_persist(sample: MathSample) -> SingleAgentResult | None:
             try:
                 result = await evaluate_sample(
                     active_client,
@@ -315,13 +332,16 @@ async def evaluate_gsm8k_subset(
                 "predicted",
                 "is_correct",
                 "error",
+                "subject",
+                "level",
+                "unique_id",
             ]
         )
 
     total = len(results)
     correct = int(df["is_correct"].sum()) if total else 0
     boxed_parsed = int(df["boxed_raw"].notna().sum()) if total else 0
-    numeric_parsed = int(df["predicted"].notna().sum()) if total else 0
+    parsed_answers = int(df["predicted"].notna().sum()) if total else 0
     errors_count = int(df["error"].notna().sum()) if total else 0
 
     metrics: dict[str, float | int | str | bool] = {
@@ -331,12 +351,14 @@ async def evaluate_gsm8k_subset(
         "correct": correct,
         "accuracy": correct / total if total else 0.0,
         "boxed_parsed": boxed_parsed,
-        "numeric_parsed": numeric_parsed,
-        "parse_rate": numeric_parsed / total if total else 0.0,
+        "parsed_answers": parsed_answers,
+        "numeric_parsed": parsed_answers,
+        "parse_rate": parsed_answers / total if total else 0.0,
         "errors": errors_count,
         "interrupted": interrupted,
     }
     return df, metrics
 
 
-evaluate_math_subset = evaluate_gsm8k_subset
+# Preserve legacy evaluator name while supporting MATH-500 samples.
+evaluate_gsm8k_subset = evaluate_math_subset

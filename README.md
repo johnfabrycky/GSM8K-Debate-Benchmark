@@ -1,6 +1,6 @@
-# gsm8k-debate
+# gsm8k-debate (MATH-500)
 
-Async multi-agent debate benchmark on GSM8K (`openai/gsm8k`, `"main"` configuration, `"test"` split) using Python 3.10+, numerical `Decimal` extraction (`\boxed{...}` / `#### <num>`), and local Ollama (`http://localhost:11434/v1`, `qwen2.5:7b`) via the OpenAI Python SDK (`openai.AsyncOpenAI`).
+Async multi-agent debate benchmark on `HuggingFaceH4/MATH-500` (`"test"` split) using Python 3.10+, `sympy` symbolic & LaTeX equivalence verification (`\boxed{...}`), and local Ollama (`http://localhost:11434/v1`, `qwen2.5:7b`) via the OpenAI Python SDK (`openai.AsyncOpenAI`).
 
 ## Setup
 
@@ -35,7 +35,7 @@ You can also set `OLLAMA_BASE_URL` / `OLLAMA_API_KEY` in a local `.env` file (se
 With `.venv` activated:
 
 ```powershell
-python -c "import openai, datasets, pandas; print('Ready')"
+python -c "import openai, datasets, pandas, sympy; print('Ready')"
 ```
 
 Run the test suite:
@@ -44,17 +44,23 @@ Run the test suite:
 pytest
 ```
 
-### 4. Run single-agent GSM8K baseline
+### 4. Run single-agent MATH-500 baseline
 
-Evaluate `qwen2.5:7b` on a subset of the `openai/gsm8k` test split (default: 15 samples):
+Evaluate `qwen2.5:7b` on a subset of `HuggingFaceH4/MATH-500` (default: 15 samples):
 
 ```powershell
 python scripts/run_single_agent.py --num-samples 15
 ```
 
+You can also filter by competition subject or difficulty level (`1`–`5`):
+
+```powershell
+python scripts/run_single_agent.py --num-samples 20 --subject "Number Theory" --level 5
+```
+
 ### 5. Run multi-agent debate (Du et al.)
 
-Run the 3-agent, 3-round asynchronous debate loop (`Round 1` independent solution + `Rounds 2 & 3` peer-debate rounds) and inspect intermediate logs (`logs/debate_logs.json`):
+Run the 3-agent, 3-round asynchronous debate loop (`Round 1` independent competition derivation + `Rounds 2 & 3` peer-debate rounds) and inspect intermediate logs (`logs/qwen_math500/debate_logs.json`):
 
 ```powershell
 python scripts/run_debate.py --num-samples 5 --show-logs 2
@@ -68,7 +74,7 @@ python scripts/run_debate.py --num-samples 2 --max-concurrency 1 --show-logs 2
 
 ### 6. Preemption & Resume Support
 
-Both `run_single_agent.py` and `run_debate.py` flush incremental JSONL checkpoints (`logs/single_agent_checkpoint.jsonl` and round-level `logs/debate_checkpoint.jsonl`) and handle `SIGINT`/`SIGTERM` gracefully. If interrupted mid-run, resume without repeating completed rounds or samples:
+Both `run_single_agent.py` and `run_debate.py` flush incremental JSONL checkpoints (`logs/qwen_math500/single_agent_checkpoint.jsonl` and round-level `logs/qwen_math500/debate_checkpoint.jsonl`) and handle `SIGINT`/`SIGTERM` gracefully. If interrupted mid-run, resume without repeating completed rounds or samples:
 
 ```powershell
 python scripts/run_debate.py --num-samples 5 --resume
@@ -76,24 +82,24 @@ python scripts/run_debate.py --num-samples 5 --resume
 
 ### 7. Inspect intermediate round logs
 
-Inspect `logs/debate_logs.json` (completed runs) or `logs/debate_checkpoint.jsonl` (in-progress or preempted runs) to see every round's peer inputs (`--show-prompts`), critiques, and answer changes:
+Inspect `logs/qwen_math500/debate_logs.json` (completed runs) or `logs/qwen_math500/debate_checkpoint.jsonl` (in-progress or preempted runs) to see every round's peer inputs (`--show-prompts`), critiques, and answer changes:
 
 ```powershell
-python scripts/inspect_logs.py --log-file logs/debate_logs.json --show-prompts
+python scripts/inspect_logs.py --log-file logs/qwen_math500/debate_logs.json --show-prompts
 ```
 
 ### 8. Side-by-side Single-Agent vs. Debate benchmark
 
-Compare Single-Agent baseline against 3-Agent Multi-Round Debate across 100 GSM8K test problems using `qwen2.5:7b` on local Ollama (`http://localhost:11434/v1`), logging accuracy, answer changes, error types (`arithmetic_slip` vs. `conceptual_logic_error`), and execution time to `results/qwen_gsm8k/` (using a separate `--checkpoint-dir` / `--output-dir` isolates runs from earlier models):
+Compare Single-Agent baseline against 3-Agent Multi-Round Debate across 100 `HuggingFaceH4/MATH-500` test problems using `qwen2.5:7b` on local Ollama (`http://localhost:11434/v1`), logging accuracy, LaTeX/SymPy answer changes, error types (`arithmetic_slip` vs. `conceptual_logic_error`), subject/level breakdowns, and execution time to `results/qwen_math500/` (isolated from earlier Gemini runs in `results/math500/`):
 
 ```powershell
-python scripts/run_benchmark.py --num-samples 100 --max-concurrency 3 --checkpoint-dir logs/qwen_gsm8k --output-dir results/qwen_gsm8k
+python scripts/run_benchmark.py --num-samples 100 --max-concurrency 3 --checkpoint-dir logs/qwen_math500 --output-dir results/qwen_math500
 ```
 
 To resume an interrupted run:
 
 ```powershell
-python scripts/run_benchmark.py --num-samples 100 --max-concurrency 3 --checkpoint-dir logs/qwen_gsm8k --output-dir results/qwen_gsm8k --resume
+python scripts/run_benchmark.py --num-samples 100 --max-concurrency 3 --checkpoint-dir logs/qwen_math500 --output-dir results/qwen_math500 --resume
 ```
 
 To point any script at another OpenAI-compatible server or model, pass `--base-url`, `--api-key`, and `--model` (or set `OLLAMA_BASE_URL` / `OLLAMA_API_KEY`):

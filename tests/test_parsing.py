@@ -1,4 +1,4 @@
-"""Unit tests for GSM8K parsing, \\boxed{...} extraction, dataset loading, and evaluation."""
+"""Unit tests for MATH-500 parsing, SymPy equivalence, and dataset mapping."""
 
 from __future__ import annotations
 
@@ -10,105 +10,213 @@ from unittest.mock import AsyncMock
 import pytest
 from google.genai import errors
 
-from gsm8k_debate.dataset import DEFAULT_GSM8K_DATASET, GSM8KSample, load_gsm8k_subset
+from gsm8k_debate.dataset import DEFAULT_MATH500_DATASET, MathSample, load_math500_subset
 from gsm8k_debate.parsing import (
     answers_match,
     extract_boxed_content,
     extract_boxed_number,
     extract_ground_truth_answer,
+    extract_math_answer,
+    parse_math_answer,
     parse_numeric_answer,
 )
-from gsm8k_debate.single_agent import _extract_retry_delay_seconds, evaluate_gsm8k_subset
+from gsm8k_debate.single_agent import _extract_retry_delay_seconds, evaluate_math_subset
 
 
 @pytest.mark.parametrize(
     ("raw_solution", "expected"),
     [
-        ("Step 1...\n#### 18", Decimal(18)),
-        ("He makes $70,000 a year.\n#### 70,000", Decimal(70000)),
-        ("Balance is -4.5\n#### -4.5", Decimal("-4.5")),
+        (r"By Vieta's formulas, the sum is \boxed{\frac{14}{3}}.", r"\frac{14}{3}"),
+        ("Step 1...\n#### 18", "18"),
+        (r"6 - 5i", "6 - 5i"),
     ],
 )
-def test_extract_ground_truth_answer(raw_solution: str, expected: Decimal) -> None:
+def test_extract_ground_truth_answer(raw_solution: str, expected: str) -> None:
     assert extract_ground_truth_answer(raw_solution) == expected
 
 
-def test_extract_ground_truth_answer_raises_without_marker() -> None:
-    with pytest.raises(ValueError, match="####"):
-        extract_ground_truth_answer("The answer is 42.")
+def test_extract_ground_truth_answer_raises_on_empty() -> None:
+    with pytest.raises(ValueError, match="Could not extract"):
+        extract_ground_truth_answer("   ")
 
 
 @pytest.mark.parametrize(
-    ("text", "expected_content", "expected_number"),
+    ("text", "expected_content", "expected_parsed"),
     [
-        (r"Therefore, the answer is \boxed{18}.", "18", Decimal(18)),
-        (r"First \boxed{10}, actually final is \boxed{70,000}.", "70,000", Decimal(70000)),
-        (r"Cost is $\boxed{\$42.50}$.", r"\$42.50", Decimal("42.50")),
-        (r"Result: \boxed{18\text{ apples}}", r"18\text{ apples}", Decimal(18)),
-        (r"Ratio is \boxed{\frac{3}{2}}", r"\frac{3}{2}", Decimal("1.5")),
-        (r"Mixed: \boxed{4\frac{1}{2}}", r"4\frac{1}{2}", Decimal("4.5")),
-        (r"Nested: \boxed{\boxed{042}}", "042", Decimal(42)),
-        (r"Value: \boxed{x = -12}", "x = -12", Decimal(-12)),
+        (r"Therefore, the answer is \boxed{18}.", "18", "18"),
+        (
+            r"First \boxed{10}, actually final is \boxed{\frac{14}{3}}.",
+            r"\frac{14}{3}",
+            r"\frac{14}{3}",
+        ),
+        (r"Redundant \boxed{\boxed{2\sqrt{5}}}", r"2\sqrt{5}", r"2\sqrt{5}"),
+        (r"Complex root: \boxed {6 - 5i}", "6 - 5i", "6 - 5i"),
+        (
+            "<think>Maybe \\boxed{10}?</think>\nFinal: \\boxed{\\frac{14}{3}}",
+            r"\frac{14}{3}",
+            r"\frac{14}{3}",
+        ),
+        ("<think>Reasoning ends with \\boxed{42}</think>", "42", "42"),
         (r"No boxed answer here: 42.", None, None),
     ],
 )
-def test_extract_boxed_number(
+def test_extract_math_answer(
     text: str,
     expected_content: str | None,
-    expected_number: Decimal | None,
+    expected_parsed: str | None,
 ) -> None:
     assert extract_boxed_content(text) == expected_content
-    assert extract_boxed_number(text) == expected_number
+    assert extract_math_answer(text) == expected_parsed
 
 
-def test_parse_numeric_answer_handles_negatives_and_percentages() -> None:
+def test_legacy_numeric_helpers_still_work() -> None:
     assert parse_numeric_answer("-$1,250") == Decimal(-1250)
     assert parse_numeric_answer(r"25\%") == Decimal(25)
     assert parse_numeric_answer("not a number") is None
     assert parse_numeric_answer(None) is None
+    assert extract_boxed_number(r"\boxed{\frac{3}{2}}") == Decimal("1.5")
+    assert extract_boxed_number(r"\boxed{4\frac{1}{2}}") == Decimal("4.5")
+    assert parse_math_answer("   ") is None
 
 
-def test_answers_match() -> None:
-    assert answers_match(Decimal("18.00"), Decimal(18))
-    assert answers_match(Decimal("0.3333333"), Decimal(1) / Decimal(3))
-    assert not answers_match(None, Decimal(18))
-    assert not answers_match(Decimal(19), Decimal(18))
+@pytest.mark.parametrize(
+    ("pred", "gt"),
+    [
+        (r"\dfrac{14}{3}", r"\frac{14}{3}"),
+        (r"4\frac{1}{2}", "4.5"),
+        (r"4\frac{1}{2}", r"\frac{9}{2}"),
+        (r"\frac{1}{\sqrt{2}}", r"\frac{\sqrt{2}}{2}"),
+        (r"3\sqrt{13}", r"\sqrt{117}"),
+        (r"\sqrt2", r"\sqrt{2}"),
+        (r"\frac12", "0.5"),
+        (r"90^\circ", "90"),
+        (r"864 \mbox{ inches}^2", "864"),
+        (r"\$32,\!348", "32348"),
+        (r"10,\!080", "10080"),
+        (r"11,\! 111,\! 111,\! 100", "11111111100"),
+        ("58,500", "58500"),
+        (r"\frac{270}7\text{ degrees}", r"\frac{270}{7}"),
+        (r"\left( 3, \frac{\pi}{2} \right)", r"(3, 0.5\pi)"),
+        ("(1, 100)", "(1, 100.0)"),
+        (r"6 - 5i", r"-5i + 6"),
+        (r"(1 + i)^2", "2i"),
+        (r"1 \pm \sqrt{19}", r"1-\sqrt{19}, 1+\sqrt{19}"),
+        (r"\frac{1 \pm \sqrt{5}}{2}", r"\frac{1+\sqrt{5}}{2}, \frac{1-\sqrt{5}}{2}"),
+        (r"\{1\pm\sqrt{5},-2\}", r"-2, 1-\sqrt{5}, 1+\sqrt{5}"),
+        (
+            r"\begin{pmatrix} -1/3 \\ 2/3 \\ 5/3 \end{pmatrix}",
+            r"\begin{pmatrix} -\frac{1}{3} \\ \frac{2}{3} \\ \frac{5}{3} \end{pmatrix}",
+        ),
+        (r"x=5", "5"),
+        (r"x=1, x=-2", "-2, 1"),
+        (r"5x - 7y + 11z + 4 = 0", r"7y = 5x + 11z + 4"),
+        (r"x \in [-2,7]", "[-2, 7]"),
+        (r"x \in [-2,7]", r"t \in [-2, 7.0]"),
+        (r"(0,9)\cup(9,36)", r"\left(0, 9\right) \cup \left(9, 36\right)"),
+        (r"(2,12) \cup (12,102)", r"(2, 12) \cup (12, \frac{204}{2})"),
+        (r"\text{Evelyn}", "Evelyn"),
+        (r"\text{(C)}", "C"),
+        (r"(x+1)^2", "x^2 + 2x + 1"),
+    ],
+)
+def test_answers_match_equivalent_latex_and_symbolic(pred: str, gt: str) -> None:
+    assert answers_match(pred, gt)
 
 
-def test_load_gsm8k_subset(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_rows = [
-        {"question": "Janet eats 3 of 16 eggs...", "answer": "Steps\n#### 18"},
-        {"question": "A robe takes 2 bolts...", "answer": "Steps\n#### 3"},
-        {"question": "Josh buys a house...", "answer": "Steps\n#### 70,000"},
+@pytest.mark.parametrize(
+    ("pred", "gt"),
+    [
+        (None, "18"),
+        (r"(3, 4]", r"[3, 4]"),
+        ("(1, 2)", "(2, 1)"),
+        ("(1, 100)", "(1100)"),
+        (r"(2,12) \cup (12,102)", r"(2,12) \cup (12102)"),
+        ("3/4", "4/3"),
+        ("6 - 5i", "6 + 5i"),
+        ("x^2", "x^3"),
+        ("C", "B"),
+        (r"\text{Evelyn}", r"\text{Navin}"),
+    ],
+)
+def test_answers_match_rejects_non_equivalent(pred: str | None, gt: str) -> None:
+    assert not answers_match(pred, gt)
+
+
+def test_load_math500_subset_maps_fields_with_mocked_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "problem": "Solve $2x = 6$.",
+            "solution": r"Dividing by $2$ gives $x = \boxed{3}$.",
+            "answer": "3",
+            "subject": "Algebra",
+            "level": 1,
+            "unique_id": "test/algebra/1.json",
+        },
+        {
+            "problem": "Simplify $(1+i)^2$.",
+            "solution": r"We expand to get \boxed{2i}.",
+            "answer": "",
+            "subject": "Precalculus",
+            "level": 4,
+            "unique_id": "test/precalc/2.json",
+        },
     ]
 
-    def _fake_load(dataset_name: str, config_name: str | None = None, split: str = "test"):
-        assert dataset_name == DEFAULT_GSM8K_DATASET
-        assert config_name == "main"
-        assert split == "test"
-        return fake_rows
+    monkeypatch.setattr(
+        "gsm8k_debate.dataset.load_dataset",
+        lambda path, split="test": rows
+        if path == DEFAULT_MATH500_DATASET and split == "test"
+        else [],
+    )
 
-    monkeypatch.setattr("gsm8k_debate.dataset.load_dataset", _fake_load)
+    loaded = load_math500_subset(num_samples=2)
+    assert len(loaded) == 2
+    assert loaded[0].question == "Solve $2x = 6$."
+    assert loaded[0].ground_truth == "3"
+    assert loaded[0].subject == "Algebra"
+    assert loaded[0].level == 1
+    assert loaded[1].ground_truth == "2i"
 
-    samples = load_gsm8k_subset(num_samples=2)
-    assert len(samples) == 2
-    assert samples[0].index == 0
-    assert samples[0].ground_truth == Decimal(18)
-    assert samples[1].ground_truth == Decimal(3)
+    filtered = load_math500_subset(num_samples=5, subject="Precalculus", level=4)
+    assert len(filtered) == 1
+    assert filtered[0].unique_id == "test/precalc/2.json"
 
-    all_shuffled = load_gsm8k_subset(num_samples=3, shuffle=True, seed=42)
-    assert {s.ground_truth for s in all_shuffled} == {Decimal(18), Decimal(3), Decimal(70000)}
+    shuffled = load_math500_subset(num_samples=2, shuffle=True, seed=42)
+    assert {s.ground_truth for s in shuffled} == {"3", "2i"}
 
 
-def test_evaluate_gsm8k_subset_with_mocked_client() -> None:
+def test_evaluate_math_subset_with_mocked_client() -> None:
     samples = [
-        GSM8KSample(index=0, question="2+2?", raw_answer="#### 4", ground_truth=Decimal(4)),
-        GSM8KSample(index=1, question="3*5?", raw_answer="#### 15", ground_truth=Decimal(15)),
-        GSM8KSample(index=2, question="9-1?", raw_answer="#### 8", ground_truth=Decimal(8)),
+        MathSample(
+            index=0,
+            question=r"Compute $\frac{1}{\sqrt{2}}$ rationalized.",
+            raw_answer=r"\boxed{\frac{\sqrt{2}}{2}}",
+            ground_truth=r"\frac{\sqrt{2}}{2}",
+            subject="Algebra",
+            level=2,
+        ),
+        MathSample(
+            index=1,
+            question="Find $3\\cdot 5$.",
+            raw_answer=r"\boxed{15}",
+            ground_truth="15",
+            subject="Prealgebra",
+            level=1,
+        ),
+        MathSample(
+            index=2,
+            question="Evaluate $9-1$.",
+            raw_answer=r"\boxed{8}",
+            ground_truth="8",
+            subject="Prealgebra",
+            level=1,
+        ),
     ]
 
     responses = [
-        SimpleNamespace(text=r"2 + 2 = 4. \boxed{4}"),
+        SimpleNamespace(text=r"Rationalizing gives \boxed{\frac{1}{\sqrt{2}}}"),
         SimpleNamespace(text=r"3 * 5 = 14. \boxed{14}"),
         SimpleNamespace(text="The answer is 8."),  # missing \boxed{}
     ]
@@ -117,24 +225,26 @@ def test_evaluate_gsm8k_subset_with_mocked_client() -> None:
         aio=SimpleNamespace(models=SimpleNamespace(generate_content=mock_generate))
     )
 
-    df, metrics = asyncio.run(evaluate_gsm8k_subset(samples, client=mock_client, max_concurrency=2))
+    df, metrics = asyncio.run(evaluate_math_subset(samples, client=mock_client, max_concurrency=2))
 
     assert len(df) == 3
     assert metrics["total"] == 3
     assert metrics["correct"] == 1
     assert metrics["accuracy"] == pytest.approx(1 / 3)
     assert metrics["boxed_parsed"] == 2
-    assert metrics["numeric_parsed"] == 2
+    assert metrics["parsed_answers"] == 2
     assert metrics["errors"] == 0
 
 
-def test_evaluate_gsm8k_subset_with_openai_compatible_client() -> None:
+def test_evaluate_math_subset_with_openai_compatible_client() -> None:
     samples = [
-        GSM8KSample(
+        MathSample(
             index=0,
-            question="Janet's ducks lay 16 eggs...",
-            raw_answer="#### 18",
-            ground_truth=Decimal(18),
+            question=r"Simplify $(1+i)^2$.",
+            raw_answer=r"\boxed{2i}",
+            ground_truth="2i",
+            subject="Precalculus",
+            level=2,
         )
     ]
 
@@ -146,8 +256,7 @@ def test_evaluate_gsm8k_subset_with_openai_compatible_client() -> None:
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(
-                        content="<think>16 - 3 - 4 = 9 eggs; 9 * 2 = 18.</think>\n"
-                        + r"Hence \boxed{18}."
+                        content="<think>(1+i)^2 = 1 + 2i - 1 = 2i.</think>\n" + r"Hence \boxed{2i}."
                     )
                 )
             ]
@@ -157,7 +266,7 @@ def test_evaluate_gsm8k_subset_with_openai_compatible_client() -> None:
         chat=SimpleNamespace(completions=SimpleNamespace(create=_create))
     )
     df, metrics = asyncio.run(
-        evaluate_gsm8k_subset(samples, client=fake_openai_client, max_concurrency=1)
+        evaluate_math_subset(samples, client=fake_openai_client, max_concurrency=1)
     )
 
     assert len(recorded_calls) == 1
@@ -165,16 +274,16 @@ def test_evaluate_gsm8k_subset_with_openai_compatible_client() -> None:
     assert recorded_calls[0]["messages"][0]["role"] == "system"
     assert recorded_calls[0]["messages"][1] == {
         "role": "user",
-        "content": "Janet's ducks lay 16 eggs...",
+        "content": r"Simplify $(1+i)^2$.",
     }
-    assert df.loc[0, "predicted"] == Decimal(18)
+    assert df.loc[0, "predicted"] == "2i"
     assert metrics["correct"] == 1
     assert metrics["model"] == "qwen2.5:7b"
 
 
-def test_evaluate_gsm8k_subset_retries_transient_server_error() -> None:
+def test_evaluate_math_subset_retries_transient_server_error() -> None:
     samples = [
-        GSM8KSample(index=0, question="2+2?", raw_answer="#### 4", ground_truth=Decimal(4)),
+        MathSample(index=0, question="2+2?", raw_answer=r"\boxed{4}", ground_truth="4"),
     ]
 
     transient_503 = errors.ServerError(503, {"error": {"message": "busy"}}, None)
@@ -186,7 +295,7 @@ def test_evaluate_gsm8k_subset_retries_transient_server_error() -> None:
     )
 
     df, metrics = asyncio.run(
-        evaluate_gsm8k_subset(
+        evaluate_math_subset(
             samples,
             client=mock_client,
             max_retries=2,

@@ -1,4 +1,4 @@
-"""Run side-by-side Single-Agent vs. Multi-Agent Debate benchmark on GSM8K (Ollama / OpenAI)."""
+"""Run side-by-side Single-Agent vs. Multi-Agent Debate benchmark on MATH-500 (Ollama / OpenAI)."""
 
 from __future__ import annotations
 
@@ -18,41 +18,46 @@ from gsm8k_debate.config import (
     get_openai_base_url,
 )
 from gsm8k_debate.dataset import (
-    DEFAULT_GSM8K_CONFIG,
-    DEFAULT_GSM8K_DATASET,
-    DEFAULT_GSM8K_SPLIT,
-    load_gsm8k_subset,
+    DEFAULT_MATH500_DATASET,
+    DEFAULT_MATH500_SPLIT,
+    load_math500_subset,
 )
 from gsm8k_debate.debate import DEFAULT_DEBATE_TEMPERATURE, DEFAULT_NUM_AGENTS, DEFAULT_NUM_ROUNDS
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare Single-Agent vs. Multi-Agent Debate on a GSM8K test subset."
+        description="Compare Single-Agent vs. Multi-Agent Debate on HuggingFaceH4/MATH-500."
     )
     parser.add_argument(
         "--dataset",
         type=str,
-        default=DEFAULT_GSM8K_DATASET,
-        help=f"Hugging Face GSM8K dataset ID (default: {DEFAULT_GSM8K_DATASET}).",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=DEFAULT_GSM8K_CONFIG,
-        help=f"Dataset configuration name (default: {DEFAULT_GSM8K_CONFIG}).",
+        default=DEFAULT_MATH500_DATASET,
+        help=f"Hugging Face MATH-500 dataset ID (default: {DEFAULT_MATH500_DATASET}).",
     )
     parser.add_argument(
         "--split",
         type=str,
-        default=DEFAULT_GSM8K_SPLIT,
-        help=f"Dataset split name (default: {DEFAULT_GSM8K_SPLIT}).",
+        default=DEFAULT_MATH500_SPLIT,
+        help=f"Dataset split name (default: {DEFAULT_MATH500_SPLIT}).",
     )
     parser.add_argument(
         "--num-samples",
         type=int,
         default=100,
-        help="Number of GSM8K test samples to benchmark (default: 100).",
+        help="Number of MATH-500 test samples to benchmark (default: 100).",
+    )
+    parser.add_argument(
+        "--subject",
+        type=str,
+        default=None,
+        help="Optional MATH-500 subject filter (e.g., Algebra, Number Theory, Precalculus).",
+    )
+    parser.add_argument(
+        "--level",
+        type=int,
+        default=None,
+        help="Optional MATH-500 difficulty level filter (1-5).",
     )
     parser.add_argument(
         "--num-agents",
@@ -137,19 +142,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
-        default=Path("logs"),
+        default=Path("logs/qwen_math500"),
         help=(
             "Directory holding single_agent_checkpoint.jsonl and debate_checkpoint.jsonl "
-            "(default: logs)."
+            "(default: logs/qwen_math500)."
         ),
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("results/benchmark"),
+        default=Path("results/qwen_math500"),
         help=(
             "Directory to write comparison.csv, summary.json, and debate_logs.json "
-            "(default: results/benchmark)."
+            "(default: results/qwen_math500)."
         ),
     )
     parser.add_argument(
@@ -173,17 +178,15 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
-    print(
-        f"Loading {args.num_samples} GSM8K samples from {args.dataset} "
-        f"({args.config}, {args.split})..."
-    )
-    samples = load_gsm8k_subset(
+    print(f"Loading {args.num_samples} samples from {args.dataset} ({args.split})...")
+    samples = load_math500_subset(
         num_samples=args.num_samples,
         dataset_name=args.dataset,
-        config_name=args.config,
         split=args.split,
         shuffle=args.shuffle,
         seed=args.seed,
+        subject=args.subject,
+        level=args.level,
     )
 
     base_url = get_openai_base_url(base_url=args.base_url)
@@ -225,6 +228,8 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     if not comparison_df.empty:
         preview_cols = [
             "index",
+            "subject",
+            "level",
             "ground_truth",
             "single_predicted",
             "single_correct",
@@ -257,6 +262,10 @@ async def main_async(args: argparse.Namespace, monitor: PreemptionMonitor) -> in
     print(f"Single-Agent Errors:    {summary['single_error_breakdown']}")
     print(f"Debate Errors:          {summary['debate_error_breakdown']}")
     print(f"Total Answer Changes:   {summary['total_answer_changes']}")
+    if "subject_breakdown" in summary:
+        print(f"By Subject:             {summary['subject_breakdown']}")
+    if "level_breakdown" in summary:
+        print(f"By Level:               {summary['level_breakdown']}")
     print(
         f"Execution Time:         single={_format_duration(summary['single_duration_seconds'])}, "
         f"debate={_format_duration(summary['debate_duration_seconds'])}, "

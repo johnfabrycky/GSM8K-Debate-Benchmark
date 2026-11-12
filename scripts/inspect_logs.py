@@ -17,10 +17,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-file",
         type=Path,
-        default=Path("logs/debate_logs.json"),
+        default=Path("logs/qwen_math500/debate_logs.json"),
         help=(
             "Path to debate_logs.json or debate_checkpoint.jsonl "
-            "(default: logs/debate_logs.json)."
+            "(default: logs/qwen_math500/debate_logs.json)."
         ),
     )
     parser.add_argument(
@@ -114,7 +114,10 @@ def main() -> None:
         return
 
     for entry in entries:
-        print(f"=== Sample {entry['index']} (Ground Truth: {entry['ground_truth']}) ===")
+        meta = ""
+        if entry.get("subject") or entry.get("level") is not None:
+            meta = f" | Subject: {entry.get('subject') or 'unknown'}, Level: {entry.get('level')}"
+        print(f"=== Sample {entry['index']} (Ground Truth: {entry['ground_truth']}{meta}) ===")
         print(f"Question: {entry['question']}")
         print(
             f"Consensus: {entry.get('consensus_answer')} | Correct: {entry.get('is_correct')}"
